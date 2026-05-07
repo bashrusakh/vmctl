@@ -2,6 +2,8 @@
 
 This package contains bootstrap scripts for the Hermes VM + standalone ESXi side of `vmctl`.
 
+Repository: https://github.com/bashrusakh/vmctl
+
 ## Files
 
 ```text

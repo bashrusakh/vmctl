@@ -31,7 +31,7 @@
 
 ```bash
 # Скачать и установить
-curl -L https://github.com/yourorg/hermes-vmctl/releases/download/v0.1.0/hermes-vmctl-v0.1.0.tar.gz -o hermes-vmctl.tar.gz
+curl -L https://github.com/bashrusakh/vmctl/releases/download/v0.1.0/hermes-vmctl-v0.1.0.tar.gz -o hermes-vmctl.tar.gz
 
 tar -xzf hermes-vmctl.tar.gz
 cd hermes-vmctl
