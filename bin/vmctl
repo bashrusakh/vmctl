@@ -1,0 +1,1171 @@
+#!/usr/bin/env python3
+import argparse
+import base64
+import datetime as dt
+import fcntl
+import gzip
+import ipaddress
+import json
+import os
+import pathlib
+import re
+import shlex
+import subprocess
+import shutil
+from subprocess import CompletedProcess
+from legacy_direct_esxi import run_ssh
+import sys
+import tempfile
+import uuid
+from contextlib import contextmanager
+
+import yaml
+
+BASE = pathlib.Path('/opt/hermes-vmctl')
+CFG_PATH = BASE / 'config' / 'vmctl.yaml'
+SECRETS_PATH = BASE / 'secrets' / 'esxi.env'
+STATE = BASE / 'state'
+LOCKS = BASE / 'locks'
+AUDIT = BASE / 'logs' / 'audit.log'
+VERSION = '0.1.0'
+
+VM_RE = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$')
+HOST_RE = re.compile(r'^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$')
+
+
+def nowz():
+    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+
+
+def load_config():
+    with open(CFG_PATH, 'r', encoding='utf-8') as f:
+        cfg = yaml.safe_load(f)
+    if not isinstance(cfg, dict):
+        raise RuntimeError('config invalid')
+    return cfg
+
+
+def load_env(path=SECRETS_PATH):
+    env = {}
+    with open(path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            if line.startswith('export '):
+                line = line[len('export '):]
+            k, v = line.split('=', 1)
+            v = v.strip().strip('"').strip("'")
+            env[k.strip()] = v
+    return env
+
+
+def audit_log(operation, vm_name, state_uuid, stage, result, error=None, next_action=None):
+    rec = {
+        'ts': nowz(), 'actor': 'hermes', 'operation': operation, 'vm_name': vm_name,
+        'state_uuid': state_uuid, 'stage': stage, 'result': result,
+    }
+    if error:
+        rec['error'] = error
+    if next_action:
+        rec['next_action'] = next_action
+    AUDIT.parent.mkdir(parents=True, exist_ok=True)
+    with open(AUDIT, 'a', encoding='utf-8') as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + '\n')
+
+
+def run_local(args, check=True):
+    return subprocess.run(args, check=check, capture_output=True, text=True)
+
+
+def _ssh_target(env):
+    user = env.get('ESXI_USER') or env.get('GOVC_USERNAME', '').split('@')[0] or 'root'
+    host = env.get('ESXI_HOST')
+    if not host:
+        raise RuntimeError('ESXI_HOST is required')
+    port = str(env.get('ESXI_SSH_PORT', '22'))
+    key = os.path.expanduser(env.get('ESXI_SSH_KEY', '~/.ssh/id_ed25519'))
+    return user, host, port, key
+
+
+def run_esxi_helper(env, args: list[str], stdin: bytes | None = None, check: bool = True) -> CompletedProcess:
+    user, host, port, key = _ssh_target(env)
+    cmd = ['ssh', '-i', key, '-p', port, f'{user}@{host}', *args]
+    return subprocess.run(cmd, input=stdin, check=check, capture_output=True)
+
+
+
+
+def helper_preflight_ok(env):
+    cp = run_esxi_helper(env, ['preflight'], check=False)
+    out = cp.stdout.decode('utf-8', errors='replace').strip()
+    if cp.returncode != 0 or out != 'OK':
+        err = cp.stderr.decode('utf-8', errors='replace').strip()
+        raise RuntimeError(f"ESXi helper preflight failed: rc={cp.returncode}, out={out!r}, err={err!r}")
+
+
+def run_govc(env, args, check=True):
+    e = os.environ.copy()
+    e.update(env)
+    govc_bin = e.get('GOVC_BIN') or shutil.which('govc') or '/usr/local/bin/govc'
+    return subprocess.run([govc_bin] + args, check=check, capture_output=True, text=True, env=e)
+
+
+def validate_vm_name(name):
+    if not VM_RE.match(name or ''):
+        raise ValueError('invalid vm name')
+
+
+def validate_hostname(hostname):
+    if not HOST_RE.match(hostname or ''):
+        raise ValueError('invalid hostname')
+
+
+def validate_network(cfg, net):
+    allowed = cfg.get('allowed_networks', [])
+    if net not in allowed:
+        raise ValueError(f'network not allowed: {net}')
+
+
+def validate_template(cfg, template):
+    t = cfg.get('templates', {}).get(template)
+    if not t:
+        raise ValueError(f'template not found: {template}')
+    for k in ('path', 'vmx', 'disk', 'datastore'):
+        if not t.get(k):
+            raise ValueError(f'template.{k} missing')
+    return t
+
+
+def validate_datastore(cfg, datastore):
+    ds = cfg.get('datastores', {}).get(datastore)
+    if not ds:
+        raise ValueError(f'unknown datastore: {datastore}')
+    if not ds.get('path'):
+        raise ValueError(f'datastores.{datastore}.path missing')
+    return ds
+
+
+def resolve_target_datastore(cfg, requested=None):
+    target = requested or cfg.get('esxi', {}).get('default_datastore')
+    if not target:
+        raise ValueError('default datastore is not configured')
+    validate_datastore(cfg, target)
+    return target
+
+
+def validate_template_placement(template, target_datastore):
+    allowed = template.get('allowed_datastores')
+    if allowed is None:
+        allowed = [template['datastore']]
+    if target_datastore not in allowed:
+        raise ValueError(f"template placement denied: {target_datastore} not in allowed_datastores")
+
+
+def validate_limits(cfg, cpu, ram_mb, disk_gb):
+    lim = cfg.get('limits', {})
+    if cpu > lim.get('max_cpu', 8):
+        raise ValueError('cpu above limit')
+    if ram_mb > lim.get('max_ram_mb', 32768):
+        raise ValueError('ram above limit')
+    if disk_gb > lim.get('max_disk_gb', 300):
+        raise ValueError('disk above limit')
+
+
+def _validate_safe_leaf_name(name, label='name'):
+    if not name or name.strip() != name:
+        raise ValueError(f'unsafe {label}')
+    if '/' in name or '\\' in name or '*' in name or '?' in name or '[' in name or ']' in name or '$' in name or '~' in name:
+        raise ValueError(f'unsafe {label}')
+    if '..' in name:
+        raise ValueError(f'unsafe {label}')
+
+
+def validate_safe_vm_path(cfg, datastore, path, vm_name):
+    _validate_safe_leaf_name(vm_name, 'vm name')
+    ds = validate_datastore(cfg, datastore)
+    exp = os.path.normpath(f"{ds['path']}/{vm_name}")
+    p = os.path.normpath(path)
+    if p in ('', '/', '/vmfs', '/vmfs/volumes', os.path.normpath(ds['path'])):
+        raise ValueError('unsafe vm path')
+    if p != exp:
+        raise ValueError('unsafe vm path')
+
+
+def validate_safe_deleted_path(cfg, datastore, path, deleted_name=None):
+    ds = validate_datastore(cfg, datastore)
+    deleted_dir = ds.get('deleted_dir', '_deleted')
+    root = os.path.normpath(f"{ds['path']}/{deleted_dir}")
+    p = os.path.normpath(path)
+    if p == root:
+        raise ValueError('unsafe deleted path')
+    if not p.startswith(root + os.sep):
+        raise ValueError('unsafe deleted path')
+    tail = p[len(root)+1:]
+    if '/' in tail or '\\' in tail:
+        raise ValueError('unsafe deleted leaf')
+    _validate_safe_leaf_name(tail, 'deleted leaf')
+    if deleted_name is not None and tail != deleted_name:
+        raise ValueError('unsafe deleted leaf')
+
+
+def json_write_atomic(path, obj):
+    path = pathlib.Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name, text=True)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(obj, f, indent=2, ensure_ascii=False)
+            f.write('\n')
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def json_read(path, default=None):
+    p = pathlib.Path(path)
+    if not p.exists():
+        return {} if default is None else default
+    with open(p, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+
+@contextmanager
+def acquire_flock(path):
+    pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)
+    with open(path, 'a+', encoding='utf-8') as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        f.seek(0)
+        f.truncate(0)
+        f.write(str(os.getpid()))
+        f.flush()
+        try:
+            yield
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+
+def render_metadata(instance_id, hostname):
+    md = {
+        'instance-id': instance_id,
+        'local-hostname': hostname,
+        'wait-on-network': {'ipv4': True},
+        'redact': ['userdata', 'vendordata'],
+    }
+    return yaml.safe_dump(md, sort_keys=False)
+
+
+def render_userdata(username, ssh_key):
+    ud = {
+        'users': [{
+            'name': username, 'groups': 'wheel', 'shell': '/bin/bash',
+            'sudo': ['ALL=(ALL) NOPASSWD:ALL'], 'ssh_authorized_keys': [ssh_key]
+        }],
+        'ssh_pwauth': False,
+        'disable_root': True,
+        'growpart': {'mode': 'auto', 'devices': ['/'], 'ignore_growroot_disabled': False},
+        'resize_rootfs': True,
+        'runcmd': [
+            'systemctl enable --now vmtoolsd || true',
+            'vmware-rpctool "info-set guestinfo.vmctl.cloudinit_status ready" || true',
+            'vmware-rpctool "info-set guestinfo.vmctl.cloudinit_done_at $(date -Iseconds)" || true'
+        ]
+    }
+    return '#cloud-config\n' + yaml.safe_dump(ud, sort_keys=False)
+
+
+def sanitize_or_render_vmx(template_vmx_text, vm_name, cpu, ram_mb, network, state_uuid, instance_id, created_at):
+    forced = {
+        'displayName': vm_name, 'numvcpus': str(cpu), 'memSize': str(ram_mb),
+        'scsi0:0.fileName': f'{vm_name}.vmdk', 'nvram': f'{vm_name}.nvram', 'extendedConfigFile': f'{vm_name}.vmxf',
+        'ethernet0.present': 'TRUE', 'ethernet0.virtualDev': 'vmxnet3', 'ethernet0.networkName': network,
+        'ethernet0.addressType': 'generated', 'ethernet0.startConnected': 'TRUE',
+        'guestinfo.vmctl.managed': 'true', 'guestinfo.vmctl.owner': 'hermes', 'guestinfo.vmctl.name': vm_name,
+        'guestinfo.vmctl.state_uuid': state_uuid, 'guestinfo.vmctl.instance_id': instance_id,
+        'guestinfo.vmctl.created_at': created_at,
+    }
+    forced_keys = {k.lower() for k in forced.keys()}
+    banned_prefixes = [
+        'uuid.bios', 'uuid.location', 'vc.uuid', 'sched.swap.derivedname',
+        'ethernet0.generatedaddress', 'ethernet0.generatedaddressoffset', 'ethernet0.address',
+        'ethernet0.addresstype', 'generatedaddress', 'migrate.hostlog', 'checkpoint.vmstate',
+        'toolsinstallmanager.updatecounter', 'guestos.detailed.data', 'guestinfo.detailed.data', 'scsi0:0.redo',
+        'snapshot.action', 'snapshot.current'
+    ]
+    out = []
+    for line in template_vmx_text.splitlines():
+        s = line.strip()
+        if not s or s.startswith('#') or '=' not in s:
+            continue
+        key, value = s.split('=', 1)
+        key = key.strip()
+        value = value.strip()
+        kl = key.lower()
+        if kl in forced_keys:
+            continue
+        if any(kl == p or kl.startswith(p) for p in banned_prefixes):
+            continue
+        out.append(f'{key} = {value}')
+    for k, v in forced.items():
+        out.append(f'{k} = "{v}"')
+    return '\n'.join(out) + '\n'
+
+
+
+
+def render_vmx_minimal(vm_name, cpu, ram_mb, network, state_uuid, instance_id, created_at, guest_os):
+    forced = {
+        'config.version': '8',
+        'virtualHW.version': '19',
+        'displayName': vm_name,
+        'guestOS': guest_os,
+        'firmware': 'efi',
+        'numvcpus': str(cpu),
+        'memSize': str(ram_mb),
+        'vhv.enable': 'TRUE',
+        'vvtd.enable': 'TRUE',
+        'vcpu.hotadd': 'TRUE',
+        'mem.hotadd': 'TRUE',
+        'floppy0.present': 'FALSE',
+        'pciBridge0.present': 'TRUE',
+        'pciBridge0.pciSlotNumber': '17',
+        'pciBridge4.present': 'TRUE',
+        'pciBridge4.virtualDev': 'pcieRootPort',
+        'pciBridge4.functions': '8',
+        'pciBridge4.pciSlotNumber': '21',
+        'pciBridge5.present': 'TRUE',
+        'pciBridge5.virtualDev': 'pcieRootPort',
+        'pciBridge5.functions': '8',
+        'pciBridge5.pciSlotNumber': '22',
+        'pciBridge6.present': 'TRUE',
+        'pciBridge6.virtualDev': 'pcieRootPort',
+        'pciBridge6.functions': '8',
+        'pciBridge6.pciSlotNumber': '23',
+        'pciBridge7.present': 'TRUE',
+        'pciBridge7.virtualDev': 'pcieRootPort',
+        'pciBridge7.functions': '8',
+        'pciBridge7.pciSlotNumber': '24',
+        'scsi0.present': 'TRUE',
+        'scsi0.virtualDev': 'pvscsi',
+        'scsi0:0.present': 'TRUE',
+        'scsi0:0.fileName': f'{vm_name}.vmdk',
+        'nvram': f'{vm_name}.nvram',
+        'extendedConfigFile': f'{vm_name}.vmxf',
+        'ethernet0.present': 'TRUE',
+        'ethernet0.virtualDev': 'vmxnet3',
+        'ethernet0.networkName': network,
+        'ethernet0.addressType': 'generated',
+        'ethernet0.startConnected': 'TRUE',
+        'guestinfo.vmctl.managed': 'true',
+        'guestinfo.vmctl.owner': 'hermes',
+        'guestinfo.vmctl.name': vm_name,
+        'guestinfo.vmctl.state_uuid': state_uuid,
+        'guestinfo.vmctl.instance_id': instance_id,
+        'guestinfo.vmctl.created_at': created_at,
+    }
+    return '\n'.join(f'{k} = "{v}"' for k, v in forced.items()) + '\n'
+def encode_guestinfo(s):
+    return base64.b64encode(gzip.compress(s.encode('utf-8'))).decode('ascii')
+
+
+def _state_path(zone, vm_name):
+    return STATE / zone / f'{vm_name}.json'
+
+
+def _find_vm_state(vm_name):
+    for zone in ('active', 'pending', 'deleted', 'failed'):
+        p = _state_path(zone, vm_name)
+        if p.exists():
+            return zone, p
+    return None, None
+
+
+def _read_vm_info_blob(env, vm_name):
+    info = run_govc(env, ['vm.info', '-e', vm_name], check=False)
+    return (info.stdout or '') + '\n' + (info.stderr or '')
+
+
+def _extract_guestinfo_value(blob, key):
+    m = re.search(rf'\b{re.escape(key)}\s*:\s*(.+)$', blob, flags=re.MULTILINE)
+    return m.group(1).strip() if m else None
+
+
+def _extract_vm_mac_from_info(blob):
+    m = re.search(r'\b([0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5})\b', blob)
+    return m.group(1).lower() if m else None
+
+
+def _wait_cloudinit_ready(env, vm_name, timeout_sec=900, interval_sec=5):
+    deadline = dt.datetime.now(dt.timezone.utc).timestamp() + timeout_sec
+    while dt.datetime.now(dt.timezone.utc).timestamp() < deadline:
+        blob = _read_vm_info_blob(env, vm_name)
+        v = _extract_guestinfo_value(blob, 'guestinfo.vmctl.cloudinit_status')
+        if isinstance(v, str) and v.lower().startswith('ready'):
+            return True
+        import time
+        time.sleep(interval_sec)
+    return False
+
+
+def _private_key_from_pub_path(path):
+    p = os.path.expanduser(path)
+    return p[:-4] if p.endswith('.pub') else p
+
+
+def _ssh_ready(ip, username, key_path, timeout_sec=300, interval_sec=5):
+    key_path = _private_key_from_pub_path(key_path)
+    deadline = dt.datetime.now(dt.timezone.utc).timestamp() + timeout_sec
+    while dt.datetime.now(dt.timezone.utc).timestamp() < deadline:
+        cp = subprocess.run([
+            'ssh', '-i', key_path,
+            '-o', 'BatchMode=yes',
+            '-o', 'StrictHostKeyChecking=no',
+            '-o', 'UserKnownHostsFile=/dev/null',
+            '-o', 'ConnectTimeout=10',
+            f'{username}@{ip}', 'true'
+        ], capture_output=True, text=True)
+        if cp.returncode == 0:
+            return True
+        import time
+        time.sleep(interval_sec)
+    return False
+
+
+def _refresh_mac_from_esxi(env, vm_name):
+    blob = _read_vm_info_blob(env, vm_name)
+    mac = _extract_guestinfo_value(blob, 'ethernet0.generatedAddress')
+    if not mac:
+        try:
+            dev = run_govc(env, ['device.info', '-vm', vm_name, 'ethernet-0'], check=False)
+            mac = _extract_vm_mac_from_info((dev.stdout or '') + '\n' + (dev.stderr or ''))
+        except Exception:
+            mac = None
+    if not mac:
+        mac = _extract_vm_mac_from_info(blob)
+    return (mac or '').lower() or None
+
+
+def _parse_managed_markers(env, vm_name):
+    blob = _read_vm_info_blob(env, vm_name)
+    m_managed = _extract_guestinfo_value(blob, 'guestinfo.vmctl.managed')
+    m_owner = _extract_guestinfo_value(blob, 'guestinfo.vmctl.owner')
+    m_name = _extract_guestinfo_value(blob, 'guestinfo.vmctl.name')
+    m_uuid = _extract_guestinfo_value(blob, 'guestinfo.vmctl.state_uuid')
+    m_inst = _extract_guestinfo_value(blob, 'guestinfo.vmctl.instance_id')
+    ok = (str(m_managed).lower()=='true' and str(m_owner).lower()=='hermes' and m_name==vm_name and bool(m_uuid) and bool(m_inst))
+    return ok, {'managed':m_managed,'owner':m_owner,'name':m_name,'state_uuid':m_uuid,'instance_id':m_inst}
+
+
+
+
+def _count_state(zone):
+    d=STATE/zone
+    return sum(1 for _ in d.glob('*.json')) if d.exists() else 0
+
+
+def _ensure_quota(cfg):
+    lim = cfg.get('limits', {})
+    max_total = int(lim.get('max_vms_total', 20))
+    max_per_req = int(lim.get('max_vms_per_request', 1))
+    if max_per_req < 1:
+        raise RuntimeError('invalid limits.max_vms_per_request: must be >= 1')
+    cur = _count_state('active') + _count_state('pending')
+    if cur >= max_total:
+        raise RuntimeError(f'max_vms_total reached: {cur}/{max_total}')
+
+
+def _govc_checked(env, op, args):
+    cp = run_govc(env, args, check=False)
+    if cp.returncode != 0:
+        err=(cp.stderr or '').strip()
+        out=(cp.stdout or '').strip()
+        raise RuntimeError(f'govc {op} failed: rc={cp.returncode}; stderr={err!r}; stdout={out!r}')
+    return cp
+
+
+def _wait_powered_off(env, vmid, timeout_sec=120, interval_sec=3):
+    import time
+    deadline = dt.datetime.now(dt.timezone.utc).timestamp() + timeout_sec
+    while dt.datetime.now(dt.timezone.utc).timestamp() < deadline:
+        cp = run_esxi_helper(env, ['power-state', str(vmid)], check=False)
+        txt = (cp.stdout.decode('utf-8', errors='replace') if isinstance(cp.stdout,(bytes,bytearray)) else str(cp.stdout or ''))
+        if 'Powered off' in txt:
+            return True
+        time.sleep(interval_sec)
+    return False
+
+
+def _find_state_uuid_conflict(state_uuid):
+    for z in ('active','pending','deleted','failed'):
+        for f in (STATE/z).glob('*.json'):
+            st=json_read(f, default={})
+            if isinstance(st,dict) and st.get('state_uuid')==state_uuid:
+                return z, str(f)
+    return None, None
+
+
+
+def _find_state_by_uuid_in_zone(zone, state_uuid):
+    for f in (STATE/zone).glob('*.json'):
+        st = json_read(f, default={})
+        if isinstance(st, dict) and st.get('state_uuid') == state_uuid:
+            return st, str(f)
+    return None, None
+
+
+def _vmx_to_ds_and_dir(cfg, vmx_path):
+    if not isinstance(vmx_path, str):
+        return None, None, None
+    for ds_name, ds in (cfg.get('datastores') or {}).items():
+        root = str(ds.get('path') or '').rstrip('/')
+        if root and vmx_path.startswith(root + '/') and vmx_path.endswith('.vmx'):
+            vm_dir = str(pathlib.Path(vmx_path).parent)
+            vm_name = pathlib.Path(vmx_path).stem
+            return ds_name, vm_dir, vm_name
+    return None, None, None
+
+
+def _inventory_from_getallvms(cfg, env, warnings=None):
+    raw = run_esxi_helper(env, ['getallvms']).stdout.decode('utf-8', errors='replace')
+    inv = []
+    for ln in raw.splitlines():
+        line = ln.strip()
+        if not line or line.startswith('Vmid'):
+            continue
+        m = re.search(r'^\s*(\d+)\s+(\S+)\s+\[([^\]]+)\]\s+(.+?\.vmx)(?:\s|$)', line)
+        if not m:
+            if warnings is not None:
+                warnings.append({'action': 'recover_inventory_parse_skip', 'line': line})
+            continue
+        vmid = int(m.group(1))
+        vm_name = m.group(2)
+        ds_br = m.group(3).strip()
+        rel_vmx = m.group(4).strip()
+        vmx_path = f"/vmfs/volumes/{ds_br}/{rel_vmx}"
+        ds_name, vm_dir, vm_stem = _vmx_to_ds_and_dir(cfg, vmx_path)
+        if ds_name is None:
+            inv.append({'vmid': vmid, 'vm_name': vm_name, 'vmx_path': vmx_path, 'ds_name': None, 'vm_dir': None})
+            continue
+        inv.append({'vmid': vmid, 'vm_name': vm_name, 'vmx_path': vmx_path, 'ds_name': ds_name, 'vm_dir': vm_dir})
+    return inv
+
+
+def create_vm(args):
+    cfg = load_config(); env = load_env()
+    helper_preflight_ok(env)
+    validate_vm_name(args.name)
+    hostname = args.hostname or re.sub(r'[^a-z0-9-]', '-', args.name.lower())
+    validate_hostname(hostname)
+    if not args.network:
+        args.network = cfg.get('esxi', {}).get('default_network')
+    validate_network(cfg, args.network)
+    t = validate_template(cfg, args.template)
+    validate_limits(cfg, args.cpu, args.ram_mb, args.disk_gb)
+
+    if args.ip != 'dhcp' or args.gateway or args.dns:
+        raise RuntimeError('static IP is not supported in v1. Use --ip dhcp and omit --gateway/--dns')
+    dns = None
+
+    ssh_key = pathlib.Path(os.path.expanduser(args.ssh_key_file)).read_text(encoding='utf-8').strip()
+    state_uuid = str(uuid.uuid4())
+    instance_id = f"vmctl-{args.name}-{state_uuid[:8]}"
+    target_ds = resolve_target_datastore(cfg, args.datastore)
+    target_ds_cfg = validate_datastore(cfg, target_ds)
+    src_ds = t['datastore']
+    validate_datastore(cfg, src_ds)
+    validate_template_placement(t, target_ds)
+
+    vm_dir = f"{target_ds_cfg['path']}/{args.name}"
+    vmx_path = f"{vm_dir}/{args.name}.vmx"
+    validate_safe_vm_path(cfg, target_ds, vm_dir, args.name)
+
+    with acquire_flock(LOCKS / 'quota.lock'):
+        _ensure_quota(cfg)
+        with acquire_flock(LOCKS / 'vm' / f'{args.name}.lock'):
+            for zone in ('active', 'pending', 'deleted', 'failed'):
+                if _state_path(zone, args.name).exists():
+                    raise RuntimeError(f'vm state already exists in zone={zone} for name={args.name}')
+            mac = None
+            st = {
+                'vm_name': args.name, 'hostname': hostname, 'state_uuid': state_uuid, 'instance_id': instance_id,
+                'template': args.template, 'template_datastore': src_ds, 'target_datastore': target_ds, 'datastore': target_ds, 'vm_dir': vm_dir, 'vmx_path': vmx_path,
+                'mac': mac, 'vmid': None, 'ip': None, 'status': 'creating', 'created_at': nowz(), 'updated_at': nowz()
+            }
+            json_write_atomic(_state_path('pending', args.name), st)
+            try:
+                run_esxi_helper(env, ['mkdir-vm', target_ds, args.name])
+                st['status'] = 'dir_created'; st['updated_at'] = nowz(); json_write_atomic(_state_path('pending', args.name), st)
+
+                template_rel_dir = os.path.relpath(t['path'], f"/vmfs/volumes/{src_ds}").replace('\\', '/')
+                if not template_rel_dir.startswith('_templates/'):
+                    raise RuntimeError('template_rel_dir must start with _templates/')
+                disk_format = cfg.get('esxi', {}).get('vm_disk_format', 'thin')
+                if disk_format not in ('thin', 'zeroedthick', 'eagerzeroedthick'):
+                    raise RuntimeError(f'invalid vm_disk_format: {disk_format}')
+                run_esxi_helper(env, ['clone-disk', src_ds, template_rel_dir, t['disk'], target_ds, args.name, disk_format])
+                st['status'] = 'disk_cloned'; st['updated_at'] = nowz(); json_write_atomic(_state_path('pending', args.name), st)
+
+                run_esxi_helper(env, ['expand-disk', target_ds, args.name, str(int(args.disk_gb))])
+                st['status'] = 'disk_resized'; st['updated_at'] = nowz(); json_write_atomic(_state_path('pending', args.name), st)
+
+                template_rel_vmx = f"{template_rel_dir}/{t['vmx']}"
+                allow_minimal = bool((cfg.get('esxi') or {}).get('allow_minimal_vmx_fallback', False))
+                template_vmx_text = None
+                local_tpl = None
+                try:
+                    with tempfile.NamedTemporaryFile('w', encoding='utf-8', suffix='.vmx', delete=False) as tf_tpl:
+                        local_tpl = tf_tpl.name
+
+                    _govc_checked(env, 'datastore.download', [
+                        'datastore.download',
+                        '-ds', src_ds,
+                        template_rel_vmx,
+                        local_tpl,
+                    ])
+
+                    template_vmx_text = pathlib.Path(local_tpl).read_text(
+                        encoding='utf-8',
+                        errors='replace',
+                    )
+                except Exception:
+                    if not allow_minimal:
+                        raise RuntimeError('template VMX download failed and minimal fallback is disabled')
+                finally:
+                    if local_tpl:
+                        try:
+                            os.unlink(local_tpl)
+                        except OSError:
+                            pass
+
+                if template_vmx_text:
+                    vmx = sanitize_or_render_vmx(template_vmx_text, args.name, args.cpu, args.ram_mb, args.network, state_uuid, instance_id, st['created_at'])
+                else:
+                    guest_os = t.get('guest_os') or ('rhel9-64' if args.template == 'alma10' else 'otherLinux64Guest')
+                    vmx = render_vmx_minimal(args.name, args.cpu, args.ram_mb, args.network, state_uuid, instance_id, st['created_at'], guest_os)
+
+                local_vmx = None
+                try:
+                    with tempfile.NamedTemporaryFile('w', encoding='utf-8', suffix='.vmx', delete=False) as tf:
+                        tf.write(vmx)
+                        local_vmx = tf.name
+
+                    remote_vmx = f"{args.name}/{args.name}.vmx"
+                    _govc_checked(env, 'datastore.upload', ['datastore.upload', '-ds', target_ds, local_vmx, remote_vmx])
+                finally:
+                    if local_vmx:
+                        try:
+                            os.unlink(local_vmx)
+                        except OSError:
+                            pass
+                st['status'] = 'vmx_generated'; st['updated_at'] = nowz(); json_write_atomic(_state_path('pending', args.name), st)
+
+                reg = run_esxi_helper(env, ['register', target_ds, args.name])
+                vmid = reg.stdout.decode('utf-8', errors='replace').strip().splitlines()[-1]
+                if not vmid.isdigit():
+                    raise RuntimeError(f'register returned non-numeric VMID: {vmid!r}')
+                st['vmid'] = int(vmid)
+                st['status'] = 'registered'; st['updated_at'] = nowz(); json_write_atomic(_state_path('pending', args.name), st)
+
+                metadata = render_metadata(instance_id, hostname)
+                userdata = render_userdata(args.user, ssh_key)
+                vm_ref = f'/ha-datacenter/vm/{args.name}'
+                _govc_checked(env, 'vm.change', ['vm.change', '-vm', vm_ref,
+                               '-e', f'guestinfo.metadata={encode_guestinfo(metadata)}',
+                               '-e', 'guestinfo.metadata.encoding=gzip+base64',
+                               '-e', f'guestinfo.userdata={encode_guestinfo(userdata)}',
+                               '-e', 'guestinfo.userdata.encoding=gzip+base64'])
+                st['status'] = 'guestinfo_injected'; st['updated_at'] = nowz(); json_write_atomic(_state_path('pending', args.name), st)
+
+                run_esxi_helper(env, ['power-on', str(st['vmid'])])
+                st['status'] = 'powered_on'; st['updated_at'] = nowz(); json_write_atomic(_state_path('pending', args.name), st)
+
+                _govc_checked(env, 'vm.ip(wait)', ['vm.ip', '-wait=20m', '-v4', vm_ref])
+                ip = _govc_checked(env, 'vm.ip', ['vm.ip', '-v4', vm_ref]).stdout.strip()
+                st['ip'] = ip
+                st['status'] = 'ip_detected'; st['updated_at'] = nowz(); json_write_atomic(_state_path('pending', args.name), st)
+
+                if not _wait_cloudinit_ready(env, args.name, timeout_sec=900, interval_sec=5):
+                    raise RuntimeError('cloud-init ready marker not observed (guestinfo.vmctl.cloudinit_status != ready)')
+                st['status'] = 'cloudinit_done'; st['updated_at'] = nowz(); json_write_atomic(_state_path('pending', args.name), st)
+
+                if not _ssh_ready(ip, args.user, args.ssh_key_file, timeout_sec=300, interval_sec=5):
+                    raise RuntimeError('ssh readiness check failed with injected key')
+                st['status'] = 'ssh_ready'; st['updated_at'] = nowz(); json_write_atomic(_state_path('pending', args.name), st)
+
+                st['mac'] = _refresh_mac_from_esxi(env, args.name)
+                st['status'] = 'ready'; st['updated_at'] = nowz()
+                json_write_atomic(_state_path('active', args.name), st)
+                os.unlink(_state_path('pending', args.name))
+                audit_log('create', args.name, state_uuid, 'ready', 'ok')
+                print(json.dumps(st, ensure_ascii=False, indent=2))
+            except Exception as e:
+                st['status'] = 'failed'; st['updated_at'] = nowz(); st['last_error'] = str(e)
+                json_write_atomic(_state_path('failed', args.name), st)
+                audit_log('create', args.name, state_uuid, st.get('status', 'failed'), 'error', str(e), 'check failed state')
+                raise
+
+
+def status_vm(args):
+    zone, p = _find_vm_state(args.name)
+    if not p:
+        raise SystemExit('vm not found in state')
+    st = json_read(p)
+    print(json.dumps({'name': st['vm_name'], 'state_zone': zone, **st}, ensure_ascii=False, indent=2))
+
+
+def list_vms(args):
+    zones = ['active']
+    if args.all:
+        zones = ['active', 'pending', 'deleted', 'failed']
+    elif args.deleted:
+        zones = ['deleted']
+    elif args.pending:
+        zones = ['pending']
+    elif args.failed:
+        zones = ['failed']
+    out = []
+    for z in zones:
+        for f in sorted((STATE / z).glob('*.json')):
+            st = json_read(f)
+            out.append({'zone': z, 'vm_name': st.get('vm_name'), 'status': st.get('status'), 'ip': st.get('ip'), 'mac': st.get('mac'), 'state_uuid': st.get('state_uuid')})
+    print(json.dumps(out, ensure_ascii=False, indent=2))
+
+
+def _is_protected(cfg, name):
+    return name in set(cfg.get('protected_vms', []))
+
+
+def delete_vm(args):
+    cfg = load_config(); env = load_env()
+    helper_preflight_ok(env)
+    validate_vm_name(args.name)
+    with acquire_flock(LOCKS / 'vm' / f'{args.name}.lock'):
+        with acquire_flock(LOCKS / 'delete.lock'):
+            p = _state_path('active', args.name)
+            if not p.exists():
+                raise RuntimeError('active state not found')
+            st = json_read(p)
+            if _is_protected(cfg, args.name):
+                raise RuntimeError('protected VM cannot be deleted')
+            target_ds = st.get('target_datastore') or st.get('datastore')
+            if not target_ds:
+                raise RuntimeError('state missing target datastore')
+            validate_safe_vm_path(cfg, target_ds, st['vm_dir'], args.name)
+            pwr = run_esxi_helper(env, ['power-state', str(st['vmid'])])
+            power = pwr.stdout.decode('utf-8', errors='replace')
+            on = 'Powered on' in power or 'powered on' in power.lower()
+            if on and not args.force:
+                raise RuntimeError('VM powered on, use --force')
+            if on and args.force:
+                run_esxi_helper(env, ['power-off', str(st['vmid'])])
+                if not _wait_powered_off(env, st['vmid'], timeout_sec=180, interval_sec=3):
+                    raise RuntimeError('power-off timeout: unregister/soft-delete skipped; use emergency/manual flow')
+            run_esxi_helper(env, ['unregister', str(st['vmid'])])
+            ts = dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d-%H%M%S')
+            del_name = f"{args.name}-{ts}"
+            ds_cfg = validate_datastore(cfg, target_ds)
+            deleted_dir = ds_cfg.get('deleted_dir', '_deleted')
+            del_path = f"{ds_cfg['path']}/{deleted_dir}/{del_name}"
+            validate_safe_deleted_path(cfg, target_ds, del_path, del_name)
+            run_esxi_helper(env, ['soft-delete', target_ds, args.name, del_name])
+            tomb = dict(st)
+            tomb['status'] = 'deleted'
+            tomb['deleted_name'] = del_name
+            tomb['deleted_path'] = del_path
+            tomb['updated_at'] = nowz()
+            json_write_atomic(_state_path('deleted', del_name), tomb)
+            os.unlink(p)
+            audit_log('delete', args.name, st['state_uuid'], 'deleted', 'ok')
+            print(json.dumps(tomb, ensure_ascii=False, indent=2))
+
+
+def purge_vm(args):
+    cfg = load_config(); env = load_env()
+    helper_preflight_ok(env)
+    validate_vm_name(args.name)
+    with acquire_flock(LOCKS / 'delete.lock'):
+        p = _state_path('deleted', args.name)
+        if not p.exists():
+            raise RuntimeError('deleted tombstone not found')
+        st = json_read(p)
+        target_ds = st.get('target_datastore') or st.get('datastore')
+        if not target_ds:
+            raise RuntimeError('tombstone missing target datastore')
+        validate_safe_deleted_path(cfg, target_ds, st['deleted_path'], st.get('deleted_name'))
+        run_esxi_helper(env, ['purge', target_ds, st['deleted_name']])
+        st['status'] = 'purged'; st['updated_at'] = nowz()
+        json_write_atomic(_state_path('failed', args.name + '.purged'), st)
+        os.unlink(p)
+        audit_log('purge', st['vm_name'], st['state_uuid'], 'purged', 'ok')
+        print(json.dumps({'purged': args.name}, ensure_ascii=False))
+
+
+def recover_vm(args):
+    cfg = load_config(); env = load_env()
+    actions = []
+    apply = bool(args.apply)
+    inv_warnings = []
+
+    try:
+        inventory = _inventory_from_getallvms(cfg, env, warnings=inv_warnings)
+    except Exception as e:
+        print(json.dumps({'dry_run': not apply, 'actions': [{'action': 'getallvms_failed', 'error': str(e)}]}, ensure_ascii=False, indent=2))
+        return
+
+    actions.extend(inv_warnings)
+
+    for vm in inventory:
+        vm_name = vm['vm_name']
+        if args.vm and vm_name != args.vm:
+            continue
+
+        if not vm.get('ds_name'):
+            actions.append({'vm_name': vm_name, 'vmid': vm.get('vmid'), 'action': 'manual_review', 'reason': 'vmx_outside_allowed_datastore', 'vmx_path': vm.get('vmx_path')})
+            continue
+
+        try:
+            ok, markers = _parse_managed_markers(env, vm_name)
+        except Exception as e:
+            actions.append({'vm_name': vm_name, 'vmid': vm.get('vmid'), 'action': 'manual_review', 'reason': 'marker_probe_failed', 'error': str(e)})
+            continue
+
+        if str(markers.get('managed')).lower() != 'true':
+            actions.append({'vm_name': vm_name, 'vmid': vm.get('vmid'), 'action': 'skip', 'reason': 'not_vmctl_managed'})
+            continue
+        if str(markers.get('owner')).lower() != 'hermes':
+            actions.append({'vm_name': vm_name, 'vmid': vm.get('vmid'), 'action': 'manual_review', 'reason': 'owner_mismatch'})
+            continue
+        if not markers.get('name') or not markers.get('state_uuid') or not markers.get('instance_id'):
+            actions.append({'vm_name': vm_name, 'vmid': vm.get('vmid'), 'action': 'manual_review', 'reason': 'incomplete_marker', 'markers': markers})
+            continue
+        if markers.get('name') != vm_name:
+            actions.append({'vm_name': vm_name, 'vmid': vm.get('vmid'), 'action': 'manual_review', 'reason': 'name_mismatch', 'marker_name': markers.get('name')})
+            continue
+
+        state_uuid = markers['state_uuid']
+        instance_id = markers['instance_id']
+
+        active_st, active_f = _find_state_by_uuid_in_zone('active', state_uuid)
+        pending_st, pending_f = _find_state_by_uuid_in_zone('pending', state_uuid)
+        deleted_st, deleted_f = _find_state_by_uuid_in_zone('deleted', state_uuid)
+        failed_st, failed_f = _find_state_by_uuid_in_zone('failed', state_uuid)
+
+        if active_st and active_st.get('vm_name') != vm_name:
+            actions.append({'vm_name': vm_name, 'vmid': vm.get('vmid'), 'action': 'manual_review', 'reason': 'state_uuid_in_active_other_vm', 'conflict_file': active_f})
+            continue
+        if pending_st:
+            actions.append({'vm_name': vm_name, 'vmid': vm.get('vmid'), 'action': 'skip', 'reason': 'state_uuid_in_pending', 'conflict_file': pending_f})
+            continue
+        if deleted_st and deleted_st.get('vm_name') != vm_name:
+            actions.append({'vm_name': vm_name, 'vmid': vm.get('vmid'), 'action': 'manual_review', 'reason': 'state_uuid_in_deleted_other_vm', 'conflict_file': deleted_f})
+            continue
+        if failed_st and failed_st.get('vm_name') != vm_name:
+            actions.append({'vm_name': vm_name, 'vmid': vm.get('vmid'), 'action': 'manual_review', 'reason': 'failed_state_uuid_name_conflict', 'conflict_file': failed_f})
+            continue
+
+        zone, existing_path = _find_vm_state(vm_name)
+        if zone == 'active' and existing_path:
+            actions.append({'vm_name': vm_name, 'vmid': vm.get('vmid'), 'action': 'skip', 'reason': 'already_active', 'state_path': str(existing_path)})
+            continue
+
+        act = {
+            'action': 'restore_active_from_marker',
+            'vm_name': vm_name,
+            'vmid': vm.get('vmid'),
+            'state_uuid': state_uuid,
+            'instance_id': instance_id,
+            'source': 'guestinfo marker' + (' + failed state' if failed_st else ''),
+            'target': str(_state_path('active', vm_name)),
+        }
+        actions.append(act)
+
+        if not apply:
+            continue
+
+        rec = {
+            'vm_name': vm_name,
+            'hostname': vm_name,
+            'state_uuid': state_uuid,
+            'instance_id': instance_id,
+            'template': (failed_st or {}).get('template'),
+            'template_datastore': (failed_st or {}).get('template_datastore'),
+            'target_datastore': vm.get('ds_name'),
+            'datastore': vm.get('ds_name'),
+            'vm_dir': vm.get('vm_dir'),
+            'vmx_path': vm.get('vmx_path'),
+            'mac': None,
+            'vmid': vm.get('vmid'),
+            'ip': None,
+            'status': 'active',
+            'created_at': (failed_st or {}).get('created_at') or nowz(),
+            'updated_at': nowz(),
+        }
+
+        try:
+            ipcp = _govc_checked(env, 'vm.ip', ['vm.ip', '-v4', vm_name])
+            ip = (ipcp.stdout or '').strip().splitlines()
+            rec['ip'] = ip[-1].strip() if ip else None
+        except Exception:
+            pass
+        try:
+            rec['mac'] = _refresh_mac_from_esxi(env, vm_name)
+        except Exception:
+            pass
+
+        rec['status'] = 'ready' if rec.get('ip') else 'powered_on'
+        json_write_atomic(_state_path('active', vm_name), rec)
+
+    print(json.dumps({'dry_run': not apply, 'actions': actions}, ensure_ascii=False, indent=2))
+
+
+
+def preflight(args):
+    cfg = load_config(); env = load_env()
+    checks = []
+    checks.append(('config_readable', True, str(CFG_PATH)))
+    checks.append(('secrets_readable', True, str(SECRETS_PATH)))
+
+    govc_ok = False
+    helper_ok = False
+
+    # Strict checks
+    try:
+        run_govc(env, ['version'])
+        govc_ok = True
+        checks.append(('govc_version', True, 'ok'))
+    except Exception as e:
+        checks.append(('govc_version', False, str(e)))
+
+    try:
+        cp = run_esxi_helper(env, ['preflight'], check=False)
+        out = cp.stdout.decode('utf-8', errors='replace').strip()
+        err = cp.stderr.decode('utf-8', errors='replace').strip()
+        helper_ok = (cp.returncode == 0 and out == 'OK')
+        details = f"rc={cp.returncode} out={out!r} err={err!r}"
+        checks.append(('esxi_helper_preflight', helper_ok, details))
+    except Exception as e:
+        checks.append(('esxi_helper_preflight', False, str(e)))
+
+    # Config-level checks (strict)
+    for ds_name, ds in cfg.get('datastores', {}).items():
+        p = ds.get('path', '')
+        ok_ds = isinstance(p, str) and p.startswith('/vmfs/volumes/') and len(p) > len('/vmfs/volumes/')
+        checks.append((f'datastore_cfg:{ds_name}', ok_ds, p or 'missing'))
+
+    for t_name, t in cfg.get('templates', {}).items():
+        src_ds = t.get('datastore')
+        ok_src = src_ds in cfg.get('datastores', {})
+        checks.append((f'{t_name}:template_datastore', ok_src, src_ds or 'missing'))
+        p = t.get('path', '')
+        exp_prefix = f"/vmfs/volumes/{src_ds}/_templates/" if src_ds else '/vmfs/volumes/'
+        ok_path = isinstance(p, str) and p.startswith(exp_prefix)
+        checks.append((f'{t_name}:template_path_cfg', ok_path, p or 'missing'))
+        for key in ('vmx', 'disk'):
+            ok_k = bool(t.get(key))
+            checks.append((f'{t_name}:{key}', ok_k, t.get(key) or 'missing'))
+
+    # Runtime/advisory checks
+    if not govc_ok:
+        checks.append(('govc_runtime_checks_skipped', True, 'SKIP/ADVISORY: govc version check failed'))
+    if not helper_ok:
+        checks.append(('helper_runtime_checks_skipped', True, 'SKIP/ADVISORY: helper preflight failed'))
+
+    if govc_ok:
+        for t_name, t in cfg.get('templates', {}).items():
+            src_ds = t.get('datastore')
+            p = t.get('path', '')
+            exp_prefix = f"/vmfs/volumes/{src_ds}/_templates/" if src_ds else '/vmfs/volumes/'
+            ok_src = src_ds in cfg.get('datastores', {})
+            ok_path = isinstance(p, str) and p.startswith(exp_prefix)
+
+            if ok_src and ok_path and t.get('vmx'):
+                rel_dir = os.path.relpath(p, f"/vmfs/volumes/{src_ds}").replace('\\\\', '/')
+                vmx_rel = f"{rel_dir}/{t['vmx']}"
+                cp = run_govc(env, ['datastore.ls', '-ds', src_ds, vmx_rel], check=False)
+                checks.append((f'{t_name}:template_vmx_exists', cp.returncode == 0, vmx_rel))
+            if ok_src and ok_path and t.get('disk'):
+                rel_dir = os.path.relpath(p, f"/vmfs/volumes/{src_ds}").replace('\\\\', '/')
+                disk_rel = f"{rel_dir}/{t['disk']}"
+                cp = run_govc(env, ['datastore.ls', '-ds', src_ds, disk_rel], check=False)
+                checks.append((f'{t_name}:template_disk_exists', cp.returncode == 0, disk_rel))
+
+    ok = all(x[1] for x in checks if not x[0].endswith('_skipped'))
+    print(json.dumps({'ok': ok, 'checks': [{'name': a, 'ok': b, 'details': c} for a, b, c in checks]}, ensure_ascii=False, indent=2))
+    if not ok:
+        raise SystemExit(2)
+
+
+
+
+def _effective_direct_mode(cfg, args):
+    cfg_allow = bool((cfg.get('security') or {}).get('allow_direct_esxi', False))
+    cli_allow = bool(getattr(args, 'allow_direct_esxi', False))
+    effective = (cli_allow and cfg_allow)
+    source = 'break-glass' if effective else 'default-deny'
+    return {'effective': effective, 'source': source, 'cli': cli_allow, 'config': cfg_allow}
+
+
+def cmd_mode(args):
+    cfg = load_config()
+    env = load_env()
+    mode = _effective_direct_mode(cfg, args)
+    out = {
+        'direct_mode_effective': mode['effective'],
+        'source': mode['source'],
+        'cli_allow_direct_esxi': mode['cli'],
+        'config_allow_direct_esxi': mode['config'],
+        'esxi_user': env.get('ESXI_USER'),
+        'esxi_host': env.get('ESXI_HOST'),
+        'esxi_ssh_port': env.get('ESXI_SSH_PORT', '22'),
+        'esxi_ssh_key': env.get('ESXI_SSH_KEY'),
+    }
+    print(json.dumps(out, ensure_ascii=False, indent=2))
+
+
+def _doctor_cloudinit_vmware_hint(cfg, env):
+    """
+    Heuristic warning: if managed active VMs have IP but no cloud-init ready marker,
+    this strongly suggests template cloud-init VMware datasource is missing/misconfigured.
+    This is a warning check (non-fatal for doctor overall).
+    """
+    suspects = []
+    for f in sorted((STATE / 'active').glob('*.json')):
+        st = json_read(f, default={})
+        if not isinstance(st, dict):
+            continue
+        name = st.get('vm_name')
+        ip = st.get('ip')
+        if not name or not ip:
+            continue
+        try:
+            info = run_govc(env, ['vm.info', '-e', name], check=False)
+            blob = (info.stdout or '') + '\n' + (info.stderr or '')
+            has_managed = 'guestinfo.vmctl.managed' in blob
+            has_ready = 'guestinfo.vmctl.cloudinit_status' in blob and 'ready' in blob
+            if has_managed and not has_ready:
+                suspects.append(name)
+        except Exception:
+            # Doctor must stay robust even if one vm.info probe fails.
+            continue
+
+    if suspects:
+        details = (
+            'WARNING: managed VM(s) have IP but no guestinfo.vmctl.cloudinit_status=ready marker: '
+            + ', '.join(suspects)
+            + '. Likely template cloud-init VMware datasource issue. '
+            + 'Fix template: /etc/cloud/cloud.cfg.d/99-vmware-datasource.cfg with datasource_list: [ VMware, None ].'
+        )
+        return True, details
+
+    return True, 'no cloud-init VMware datasource warning signals detected'
+
+
+def cmd_doctor(args):
+    cfg = load_config()
+    env = load_env()
+    mode = _effective_direct_mode(cfg, args)
+
+    checks = []
+    checks.append(('config_readable', True, str(CFG_PATH)))
+    checks.append(('secrets_readable', True, str(SECRETS_PATH)))
+
+    for k in ('ESXI_HOST', 'ESXI_USER'):
+        checks.append((f'env:{k}', bool(env.get(k)), env.get(k) or 'missing'))
+
+    checks.append(('direct_mode_effective', True, f"{mode['effective']} (source={mode['source']})"))
+    if mode['effective']:
+        checks.append(('direct_mode_break_glass_warning', True, 'WARNING: direct mode is effective (break-glass only)'))
+    elif mode.get('config'):
+        checks.append(('direct_mode_config_warning', True, 'WARNING: security.allow_direct_esxi=true; direct mode can be enabled with CLI flag'))
+
+    try:
+        run_govc(env, ['version'])
+        checks.append(('govc_version', True, 'ok'))
+    except Exception as e:
+        checks.append(('govc_version', False, str(e)))
+
+    try:
+        cp = run_esxi_helper(env, ['preflight'], check=False)
+        out = cp.stdout.decode('utf-8', errors='replace').strip()
+        err = cp.stderr.decode('utf-8', errors='replace').strip()
+        ok = cp.returncode == 0 and out == 'OK'
+        checks.append(('helper_preflight_strict', ok, f"rc={cp.returncode} out={out!r} err={err!r}"))
+    except Exception as e:
+        checks.append(('helper_preflight_strict', False, str(e)))
+
+    warn_ok, warn_details = _doctor_cloudinit_vmware_hint(cfg, env)
+    checks.append(('cloudinit_vmware_datasource_hint', warn_ok, warn_details))
+
+    ok_all = all(x[1] for x in checks)
+    print(json.dumps({'ok': ok_all, 'checks': [{'name': a, 'ok': b, 'details': c} for a, b, c in checks]}, ensure_ascii=False, indent=2))
+    if not ok_all:
+        raise SystemExit(2)
+
+def main():
+    p = argparse.ArgumentParser(prog='vmctl')
+    p.add_argument('--version', action='store_true')
+    p.add_argument('--allow-direct-esxi', action='store_true', help='emergency fallback: allow direct ESXi shell commands')
+    sub = p.add_subparsers(dest='cmd')
+
+    c = sub.add_parser('create')
+    c.add_argument('--name', required=True)
+    c.add_argument('--hostname')
+    c.add_argument('--template', required=True)
+    c.add_argument('--cpu', required=True, type=int)
+    c.add_argument('--ram-mb', required=True, type=int)
+    c.add_argument('--disk-gb', required=True, type=int)
+    c.add_argument('--network')
+    c.add_argument('--datastore')
+    c.add_argument('--user', required=True)
+    c.add_argument('--ssh-key-file', required=True)
+    c.add_argument('--ip', default='dhcp')
+    c.add_argument('--gateway')
+    c.add_argument('--dns')
+
+    s = sub.add_parser('status'); s.add_argument('name')
+    l = sub.add_parser('list')
+    l.add_argument('--all', action='store_true')
+    l.add_argument('--deleted', action='store_true')
+    l.add_argument('--pending', action='store_true')
+    l.add_argument('--failed', action='store_true')
+    d = sub.add_parser('delete'); d.add_argument('name'); d.add_argument('--force', action='store_true')
+    g = sub.add_parser('purge'); g.add_argument('name')
+    r = sub.add_parser('recover'); r.add_argument('--dry-run', action='store_true'); r.add_argument('--apply', action='store_true'); r.add_argument('--vm')
+    sub.add_parser('preflight')
+    sub.add_parser('mode')
+    sub.add_parser('doctor')
+
+    args = p.parse_args()
+    if args.version:
+        print(VERSION); return
+
+    cfg = load_config()
+    mode = _effective_direct_mode(cfg, args)
+    if mode['effective']:
+        os.environ['ALLOW_DIRECT_ESXI'] = '1'
+
+    if args.cmd == 'create':
+        create_vm(args)
+    elif args.cmd == 'status':
+        status_vm(args)
+    elif args.cmd == 'list':
+        list_vms(args)
+    elif args.cmd == 'delete':
+        delete_vm(args)
+    elif args.cmd == 'purge':
+        purge_vm(args)
+    elif args.cmd == 'recover':
+        recover_vm(args)
+    elif args.cmd == 'preflight':
+        preflight(args)
+    elif args.cmd == 'mode':
+        cmd_mode(args)
+    elif args.cmd == 'doctor':
+        cmd_doctor(args)
+    else:
+        p.print_help(); sys.exit(1)
+
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,43 @@
+esxi:
+  host: 192.168.1.34
+  user: vmctl-ssh
+  ssh_port: 22
+  ssh_key: /opt/hermes-vmctl/secrets/vmctl_ssh_key
+  default_datastore: datastore1
+  default_network: VM Network
+  vm_disk_format: thin
+datastores:
+  datastore1:
+    path: /vmfs/volumes/datastore1
+    deleted_dir: _deleted
+    templates_dir: _templates
+templates:
+  alma10:
+    datastore: datastore1
+    path: /vmfs/volumes/datastore1/_templates/template_alma10_cert
+    vmx: template_alma10_cert.vmx
+    disk: template_alma10_cert.vmdk
+    guest_os: rhel9-64
+    allowed_datastores:
+    - datastore1
+allowed_networks:
+- VM Network
+limits:
+  max_cpu: 8
+  max_ram_mb: 32768
+  max_disk_gb: 300
+  max_vms_total: 20
+  max_vms_per_request: 1
+protected_vms:
+- hermes
+- router
+- dns
+- backup
+- vcenter
+- openclaw
+- moltis
+security:
+  allow_direct_esxi: false
+delete:
+  deleted_dir: _deleted
+

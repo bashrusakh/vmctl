@@ -1,0 +1,25 @@
+# Secrets and credentials
+secrets/
+install.env
+.govmomi/
+.ssh/
+mac-pool/leases.json
+
+# Runtime state
+state/
+locks/
+logs/
+tmp/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Archives
+*.tar.gz
+
+# Extra safety explicit files
+secrets/esxi.env
+secrets/generated-passwords.txt
+secrets/vmctl_ssh_key
+.govmomi/sessions
