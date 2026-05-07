@@ -1,8 +1,8 @@
-# hermes-vmctl bootstrap files
+# vmctl bootstrap files
 
 This package contains bootstrap scripts for the Hermes VM + standalone ESXi side of `vmctl`.
 
-Repository: https://github.com/bashrusakh/vmctl
+Release archive: https://github.com/bashrusakh/vmctl/releases/download/v0.1.0/hermes-vmctl-v0.1.0.tar.gz
 
 ## Files
 
@@ -17,6 +17,10 @@ docs/BUGFIX_LIST_TEST_PHASE.md
 ## Install
 
 ```bash
+curl -L https://github.com/bashrusakh/vmctl/releases/download/v0.1.0/hermes-vmctl-v0.1.0.tar.gz -o hermes-vmctl.tar.gz
+tar -xzf hermes-vmctl.tar.gz
+cd hermes-vmctl
+
 cp install.env.example install.env
 nano install.env
 sudo scripts/install-full-stack.sh --env ./install.env

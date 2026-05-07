@@ -1,6 +1,6 @@
 <div align="center">
 
-# hermes-vmctl
+# vmctl
 
 Простое, безопасное и надёжное управление виртуальными машинами на standalone ESXi
 
