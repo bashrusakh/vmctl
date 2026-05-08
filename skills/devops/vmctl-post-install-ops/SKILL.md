@@ -33,6 +33,22 @@ Do **not** use for:
 - Workdir: `/opt/hermes-vmctl`
 - Do not guess values; use config/secrets already deployed by installer.
 
+## Quick Reference
+
+```bash
+# baseline checks
+sudo -n -u vmctl-runner /opt/hermes-vmctl/bin/vmctl mode
+sudo -n -u vmctl-runner /opt/hermes-vmctl/bin/vmctl preflight
+sudo -n -u vmctl-runner /opt/hermes-vmctl/bin/vmctl doctor
+sudo -n -u vmctl-runner /opt/hermes-vmctl/bin/vmctl list --all
+
+# recover state drift
+sudo -n -u vmctl-runner /opt/hermes-vmctl/bin/vmctl recover --dry-run
+sudo -n -u vmctl-runner /opt/hermes-vmctl/bin/vmctl recover --apply
+```
+
+## Procedure
+
 ## Phase 1 — Mandatory health gate
 Run in order:
 
