@@ -19,7 +19,7 @@ Goal: quickly verify that vmctl is operational, run a safe smoke cycle, clean ar
 
 Installation source (performed by operator):
 - Repository: https://github.com/bashrusakh/vmctl
-- Release archive: https://github.com/bashrusakh/vmctl/releases/download/v0.1.1/hermes-vmctl-v0.1.1.tar.gz
+- Latest release page: https://github.com/bashrusakh/vmctl/releases/latest
 
 Important:
 - This is a **post-install** skill.
