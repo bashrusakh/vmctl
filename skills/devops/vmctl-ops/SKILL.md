@@ -29,7 +29,7 @@ Important:
 ## When to Use
 - vmctl was just installed or reinstalled.
 - ESXi/helper credentials are already configured.
-- Operator asks: “прогони тест”, “проверь после установки”, “почему не работает”.
+- Operator asks: "run a test", "check after install", "why is it not working".
 
 Do **not** use for:
 - bootstrap installation itself;

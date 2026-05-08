@@ -95,7 +95,7 @@ hermes skills install https://raw.githubusercontent.com/bashrusakh/vmctl/main/sk
 ## Use in session
 
 - Load explicitly: `/skill vmctl-ops`
-- Or ask naturally: “прогони post-install smoke для vmctl”
+- Or ask naturally: "run post-install smoke for vmctl"
 
 The skill’s execution contract and exact commands are defined in `SKILL.md`.
 

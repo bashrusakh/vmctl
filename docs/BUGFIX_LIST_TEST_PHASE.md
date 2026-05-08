@@ -1,112 +1,112 @@
 # vmctl — Bugfix List (Test Phase)
 
-Период: с момента начала интеграционного тестирования проекта на реальном ESXi контуре.
+Period: from the start of integration testing on the real ESXi environment.
 
 ## 1) Health/diagnostics
 
-- **Исправлен govc-чек в preflight/doctor**:
-  - было: `govc about` (нестабильно/несовместимо в контуре)
-  - стало: `govc version`
-- **Усилен резолв govc-бинаря**:
+- **Fixed govc check in preflight/doctor**:
+  - before: `govc about` (unstable/incompatible in this environment)
+  - after: `govc version`
+- **Hardened govc binary resolution**:
   - `GOVC_BIN` -> `shutil.which('govc')` -> `/usr/local/bin/govc`
-- **Добавлен строгий helper-check** в doctor:
-  - успех только при `rc == 0` и `stdout == "OK"`
-- **Добавлен предупреждающий check** `cloudinit_vmware_datasource_hint`:
-  - детектирует managed VM с IP, но без `guestinfo.vmctl.cloudinit_status=ready`
-  - даёт явный remediation для VMware datasource в template.
+- **Added strict helper check** in doctor:
+  - success only when `rc == 0` and `stdout == "OK"`
+- **Added warning check** `cloudinit_vmware_datasource_hint`:
+  - detects managed VM with IP but without `guestinfo.vmctl.cloudinit_status=ready`
+  - provides explicit remediation for VMware datasource in the template.
 
 ## 2) ESXi bootstrap / helper reliability
 
 - **bootstrap-esxi-side.sh**:
-  - расширен `PATH` для non-interactive shell (`/bin:/sbin:/usr/bin:/usr/sbin`)
-  - root-check сделан устойчивее
-- **Идемпотентная синхронизация аккаунтов ESXi**:
-  - если пользователь уже есть, теперь выполняется `esxcli system account set` для синхронизации пароля
-  - устранён рассинхрон `esxi.env` vs фактические креды ESXi
-- **helper heredoc переведён на quoted** `<<'HELPER_EOF'` + placeholders
-- **authorized_keys append** переведён на безопасный `grep -qF`.
+  - expanded `PATH` for non-interactive shell (`/bin:/sbin:/usr/bin:/usr/sbin`)
+  - made root-check more robust
+- **Idempotent ESXi account synchronization**:
+  - if user already exists, now runs `esxcli system account set` to sync password
+  - removed drift between `esxi.env` and actual ESXi credentials
+- **Helper heredoc switched to quoted** `<<'HELPER_EOF'` + placeholders
+- **authorized_keys append** moved to safe `grep -qF` logic.
 
-## 3) Create-flow (критические исправления)
+## 3) Create flow (critical fixes)
 
-- **Убран зависимый helper-путь `write-vmx-b64`** из критической цепочки
-  - причина: на ESXi фиксировалось `base64: not found`
-  - замена: генерация VMX локально + `govc datastore.upload`
-- **Исправлен guest OS для alma10**:
-  - корректный `guest_os: rhel9-64`
-- **Добавлены/исправлены VMX-флаги совместимости**:
+- **Removed helper-dependent path `write-vmx-b64`** from critical chain
+  - reason: ESXi reported `base64: not found`
+  - replacement: generate VMX locally + upload via `govc datastore.upload`
+- **Fixed guest OS for alma10**:
+  - correct `guest_os: rhel9-64`
+- **Added/fixed VMX compatibility flags**:
   - `vhv.enable = TRUE`
   - `vvtd.enable = TRUE`
   - `vcpu.hotadd = TRUE`
   - `mem.hotadd = TRUE`
   - `floppy0.present = FALSE`
-  - корректный PCIe bridge layout
-- **Исправлен режим firmware/NIC для template-based create**:
+  - correct PCIe bridge layout
+- **Fixed firmware/NIC mode for template-based create**:
   - `firmware = efi`
-  - `ethernet0.addressType = generated` (MAC от ESXi)
-- **DHCP-путь стандартизирован для template-based provisioning**
-- **Ожидание IP переведено на IPv4-only**:
+  - `ethernet0.addressType = generated` (MAC assigned by ESXi)
+- **Standardized DHCP path for template-based provisioning**
+- **Changed IP wait to IPv4-only**:
   - `govc vm.ip -wait=... -v4`
-  - чтобы не принимать link-local IPv6 за успех.
+  - avoids treating link-local IPv6 as success.
 
 ## 4) Cloud-init / SSH readiness
 
-- **Переопределён критерий успешного create-теста**:
-  - недостаточно `powered on + ip`
-  - обязательно:
-    1. IPv4 получен
+- **Redefined successful create-test criteria**:
+  - `powered on + ip` is not enough
+  - required:
+    1. IPv4 acquired
     2. marker `guestinfo.vmctl.cloudinit_status=ready`
-    3. SSH login по инжектированному ключу
-- **Подтверждён root-cause SSH-fail** на тестовом этапе:
-  - отсутствовал/не был включён VMware datasource в template
-- После включения datasource в template:
-  - marker `ready` появляется
-  - SSH по ключу проходит стабильно.
+    3. SSH login with injected key
+- **Confirmed root cause of SSH failures** during test phase:
+  - VMware datasource was missing/not enabled in template
+- After enabling datasource in template:
+  - `ready` marker appears
+  - key-based SSH works consistently.
 
 ## 5) Multi-datastore logic hardening
 
-- Добавлен `--datastore` в create
-- Fallback на `esxi.default_datastore`, если флаг не задан
-- Валидация `config.datastores` + placement через `template.allowed_datastores`
-- В state сохраняются:
+- Added `--datastore` to create
+- Fallback to `esxi.default_datastore` when flag is not provided
+- Validation for `config.datastores` + placement via `template.allowed_datastores`
+- State now stores:
   - `template_datastore`
   - `target_datastore`
-  - `datastore` как alias
-- delete/purge берут datastore **только из state/tombstone**, не из CLI.
+  - `datastore` as alias
+- delete/purge read datastore **only from state/tombstone**, not from CLI.
 
 ## 6) Install/ops hardening
 
-- В install-flow добавлен sanity-check PyYAML: `python3 -c "import yaml"`
-- Bootstrap-параметры на ESXi передаются через временный env-файл (`/tmp/vmctl-bootstrap.env`), не inline с чувствительными значениями
-- Ужесточены права:
+- Added PyYAML sanity-check in install flow: `python3 -c "import yaml"`
+- ESXi bootstrap parameters are passed through temporary env file (`/tmp/vmctl-bootstrap.env`), not inline with sensitive values
+- Tightened permissions:
   - `/opt/hermes-vmctl` = `750`
   - `/opt/hermes-vmctl/secrets` = `700`
-  - файлы секретов = `600`
-- `DRY_RUN` унифицирован через `${DRY_RUN:-0}`
-- Добавлен install-лог: `/var/log/hermes-vmctl-install.log`
-- `ALLOW_DIRECT_ESXI=0` оставлен как безопасный дефолт.
+  - secret files = `600`
+- Standardized `DRY_RUN` via `${DRY_RUN:-0}`
+- Added install log: `/var/log/hermes-vmctl-install.log`
+- `ALLOW_DIRECT_ESXI=0` kept as secure default.
 
-## 7) Bug patterns, подтверждённые в тестах (и закрытые)
+## 7) Bug patterns confirmed in tests (and resolved)
 
-- `govc about` false-red / incompatibility -> закрыто переходом на `govc version`
-- helper `write-vmx-b64` падал из-за отсутствия `base64` -> закрыто upload-путём
-- `Cannot complete login due to incorrect user/password` -> закрыто account-set sync в bootstrap
-- `unsupportedGuestOS` -> закрыто `rhel9-64`
-- `No PCIe slot available for SCSI0/Ethernet0` -> закрыто корректировкой VMX layout
-- DHCP false-hang на IPv6 -> закрыто IPv4-only wait + сетевой проверкой nested
-- `Permission denied` по SSH при наличии guestinfo -> закрыто включением VMware datasource в template.
+- `govc about` false-red / incompatibility -> resolved by switching to `govc version`
+- helper `write-vmx-b64` failed due to missing `base64` -> resolved via upload path
+- `Cannot complete login due to incorrect user/password` -> resolved via account-set sync in bootstrap
+- `unsupportedGuestOS` -> resolved with `rhel9-64`
+- `No PCIe slot available for SCSI0/Ethernet0` -> resolved by VMX layout correction
+- DHCP false-hang on IPv6 -> resolved by IPv4-only wait + nested network check
+- SSH `Permission denied` despite guestinfo marker -> resolved by enabling VMware datasource in template.
 
 ## 8) Validation status after fixes
 
 - `preflight`: green
 - `doctor`: green + datasource hint check
-- E2E cycle проходит:
+- E2E cycle passes:
   - create -> marker ready -> SSH -> sudo/install check -> delete -> purge
-- Проверено, что на созданной VM возможны:
-  - вход по ключу без пароля
+- Verified on created VM:
+  - key-based passwordless login
   - `sudo -n`
-  - установка пакетов (`dnf install ...`).
+  - package installation (`dnf install ...`).
 
-## 9) Remaining recommendations (not blocker)
+## 9) Remaining recommendations (not blockers)
 
-- Автоматизировать VMware datasource в пайплайне сборки template (Packer/Ansible), чтобы не править вручную каждый новый образ.
-- При желании разделить `doctor` на strict и advisory секции (сейчас hint не валит общий `ok`).
+- Automate VMware datasource in template build pipeline (Packer/Ansible) to avoid manual edits for each new image.
+- Optionally split `doctor` into strict and advisory sections (currently the hint does not fail overall `ok`).
