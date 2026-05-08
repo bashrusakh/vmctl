@@ -2,7 +2,7 @@
 
 # vmctl
 
-Простое, безопасное и надёжное управление виртуальными машинами на standalone ESXi
+Simple, safe, and reliable virtual machine management for standalone ESXi
 
 ![Version](https://img.shields.io/badge/version-0.1.0-blue?style=flat-square)
 ![Python](https://img.shields.io/badge/Python-3.8%2B-blue?style=flat-square)
@@ -13,24 +13,24 @@
 
 <br>
 
-`vmctl` — современный CLI-инструмент для создания, управления и жизненного цикла виртуальных машин на standalone ESXi без vCenter.
+`vmctl` is a modern CLI tool for creating, managing, and operating virtual machines on standalone ESXi without vCenter.
 
-## Основные возможности
+## Key Features
 
-- Полностью standalone (работает без vCenter)
-- Template-based provisioning с cloud-init
-- Поддержка нескольких datastores с контролем размещения
-- Жёсткие квоты и защита важных ВМ (`protected_vms`)
-- Полный lifecycle: `create → status → delete → purge + recover`
-- Безопасная модель: forced-command SSH helper + минимальные права
-- Удобная диагностика: `preflight + doctor`
+- Fully standalone (works without vCenter)
+- Template-based provisioning with cloud-init
+- Multi-datastore support with placement control
+- Strict quotas and protection for critical VMs (`protected_vms`)
+- Full lifecycle: `create → status → delete → purge + recover`
+- Secure model: forced-command SSH helper with minimal privileges
+- Built-in diagnostics: `preflight + doctor`
 
 ---
 
-## Быстрый старт
+## Quick Start
 
 ```bash
-# Скачать и установить
+# Download and install
 curl -L https://github.com/bashrusakh/vmctl/releases/download/v0.1.0/hermes-vmctl-v0.1.0.tar.gz -o hermes-vmctl.tar.gz
 
 tar -xzf hermes-vmctl.tar.gz
@@ -45,7 +45,7 @@ vmctl preflight
 vmctl doctor
 ```
 
-### Пример создания ВМ
+### VM Creation Example
 
 ```bash
 vmctl create \
@@ -60,35 +60,35 @@ vmctl create \
   --ip dhcp
 ```
 
-## Основные команды
+## Core Commands
 
-- `create` — создать новую ВМ
-- `status <name>` — показать статус ВМ
-- `list [--all]` — список ВМ
-- `delete <name> [--force]` — удалить ВМ
-- `purge <deleted-name>` — окончательно удалить данные
-- `recover [--apply]` — восстановить ВМ по маркерам
-- `preflight` — проверка конфигурации
-- `doctor` — полная диагностика системы
+- `create` — create a new VM
+- `status <name>` — show VM status
+- `list [--all]` — list VMs
+- `delete <name> [--force]` — delete a VM
+- `purge <deleted-name>` — permanently remove deleted VM data
+- `recover [--apply]` — recover VM state from markers
+- `preflight` — run configuration checks
+- `doctor` — run full system diagnostics
 
-## Требования
+## Requirements
 
 - ESXi 7.0+ Enterprise (standalone)
-- Linux-машина (Hermes) с Python 3.8+
-- SSH-доступ от Hermes к ESXi
+- Linux host (Hermes) with Python 3.8+
+- SSH access from Hermes to ESXi
 
-## Безопасность
+## Security
 
-- Direct-режим отключён по умолчанию
-- Forced-command SSH helper с whitelist-командами
-- Строгая валидация путей и имён
-- Поддержка списка защищённых ВМ (`protected_vms`)
+- Direct mode is disabled by default
+- Forced-command SSH helper with whitelisted commands
+- Strict path and name validation
+- Protected VM list support (`protected_vms`)
 
-## Документация
+## Documentation
 
-- [Инструкция по установке](./README.bootstrap.md)
-- [Список исправлений](./docs/BUGFIX_LIST_TEST_PHASE.md)
-- [История изменений](./CHANGELOG.md)
+- [Installation Guide](./README.bootstrap.md)
+- [Bugfix List](./docs/BUGFIX_LIST_TEST_PHASE.md)
+- [Changelog](./CHANGELOG.md)
 
 ---
 
