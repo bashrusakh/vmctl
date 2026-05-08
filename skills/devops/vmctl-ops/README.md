@@ -1,6 +1,6 @@
-# vmctl-post-install-ops
+# vmctl-ops
 
-`vmctl-post-install-ops` is a post-install operational skill for Hermes Agent.
+`vmctl-ops` is a post-install operational skill for Hermes Agent.
 
 It tells the agent exactly what to do **after `vmctl` is already installed**:
 - run mandatory health checks,
@@ -81,20 +81,20 @@ If `vmctl` is missing, the skill requires the agent to stop and redirect operato
 ## Install this skill in Hermes
 
 ```bash
-hermes skills install https://raw.githubusercontent.com/bashrusakh/vmctl/main/skills/devops/vmctl-post-install-ops/SKILL.md
+hermes skills install https://raw.githubusercontent.com/bashrusakh/vmctl/main/skills/devops/vmctl-ops/SKILL.md
 ```
 
 Optional: install with confirmation bypass in non-interactive flow:
 
 ```bash
-hermes skills install https://raw.githubusercontent.com/bashrusakh/vmctl/main/skills/devops/vmctl-post-install-ops/SKILL.md --yes
+hermes skills install https://raw.githubusercontent.com/bashrusakh/vmctl/main/skills/devops/vmctl-ops/SKILL.md --yes
 ```
 
 ---
 
 ## Use in session
 
-- Load explicitly: `/skill vmctl-post-install-ops`
+- Load explicitly: `/skill vmctl-ops`
 - Or ask naturally: “прогони post-install smoke для vmctl”
 
 The skill’s execution contract and exact commands are defined in `SKILL.md`.

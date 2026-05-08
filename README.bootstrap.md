@@ -68,7 +68,7 @@ The SSH helper is multi-datastore aware and accepts datastore as an explicit che
 
 For Hermes Agent automation after install, use:
 
-- `skills/devops/vmctl-post-install-ops/SKILL.md`
+- `skills/devops/vmctl-ops/SKILL.md`
 
 It defines the exact post-install gate (`mode/preflight/doctor`), smoke create-test, cleanup, and recovery flow.
 

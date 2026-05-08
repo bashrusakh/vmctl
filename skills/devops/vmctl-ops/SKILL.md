@@ -1,5 +1,5 @@
 ---
-name: vmctl-post-install-ops
+name: vmctl-ops
 description: Use when vmctl is already installed and the agent must immediately run safe post-install checks and first lifecycle actions without guessing.
 version: 1.0.0
 author: Leonid + Hermes Agent
