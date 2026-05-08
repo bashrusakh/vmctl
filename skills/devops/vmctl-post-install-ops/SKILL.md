@@ -24,7 +24,7 @@ Installation source (performed by operator):
 Important:
 - This is a **post-install** skill.
 - If vmctl is not installed, the agent must stop and ask operator to install from the repo/release link above.
-- Do not attempt bootstrap installation requiring `sudo` unless operator explicitly grants/requests it.
+- Do not attempt bootstrap installation. If `vmctl` is missing, stop and redirect operator to repo/release install docs.
 
 ## When to Use
 - vmctl was just installed or reinstalled.
@@ -37,8 +37,7 @@ Do **not** use for:
 - production VM provisioning with non-test names.
 
 ## Default Execution Mode
-- Run vmctl as service user:
-  - `sudo -n -u vmctl-runner /opt/hermes-vmctl/bin/vmctl ...`
+- Run as plain `vmctl` CLI (no privilege escalation or forced user switching in this skill).
 - Workdir: `/opt/hermes-vmctl`
 - Do not guess values; use config/secrets already deployed by installer.
 
@@ -46,14 +45,14 @@ Do **not** use for:
 
 ```bash
 # baseline checks
-sudo -n -u vmctl-runner /opt/hermes-vmctl/bin/vmctl mode
-sudo -n -u vmctl-runner /opt/hermes-vmctl/bin/vmctl preflight
-sudo -n -u vmctl-runner /opt/hermes-vmctl/bin/vmctl doctor
-sudo -n -u vmctl-runner /opt/hermes-vmctl/bin/vmctl list --all
+vmctl mode
+vmctl preflight
+vmctl doctor
+vmctl list --all
 
 # recover state drift
-sudo -n -u vmctl-runner /opt/hermes-vmctl/bin/vmctl recover --dry-run
-sudo -n -u vmctl-runner /opt/hermes-vmctl/bin/vmctl recover --apply
+vmctl recover --dry-run
+vmctl recover --apply
 ```
 
 ## Procedure
@@ -62,10 +61,10 @@ sudo -n -u vmctl-runner /opt/hermes-vmctl/bin/vmctl recover --apply
 Run in order:
 
 ```bash
-sudo -n -u vmctl-runner /opt/hermes-vmctl/bin/vmctl mode
-sudo -n -u vmctl-runner /opt/hermes-vmctl/bin/vmctl preflight
-sudo -n -u vmctl-runner /opt/hermes-vmctl/bin/vmctl doctor
-sudo -n -u vmctl-runner /opt/hermes-vmctl/bin/vmctl list --all
+vmctl mode
+vmctl preflight
+vmctl doctor
+vmctl list --all
 ```
 
 Rules:
@@ -79,7 +78,7 @@ Use a test name only:
 Minimal smoke command:
 
 ```bash
-sudo -n -u vmctl-runner /opt/hermes-vmctl/bin/vmctl create \
+vmctl create \
   --name vmctl-test-smoke-<timestamp> \
   --template alma10 \
   --cpu 2 \
@@ -92,7 +91,7 @@ sudo -n -u vmctl-runner /opt/hermes-vmctl/bin/vmctl create \
 Then:
 
 ```bash
-sudo -n -u vmctl-runner /opt/hermes-vmctl/bin/vmctl status <name>
+vmctl status <name>
 ```
 
 Success criteria:
@@ -104,7 +103,7 @@ Success criteria:
 Delete+purge test VM after smoke run unless operator asked to keep it.
 
 ```bash
-sudo -n -u vmctl-runner /opt/hermes-vmctl/bin/vmctl delete <name> --force
+vmctl delete <name> --force
 ```
 
 Important: `purge` uses **deleted tombstone name**, not original VM name.
@@ -121,15 +120,15 @@ if c:
     print(os.path.basename(c[0])[:-5])
 PY
 
-sudo -n -u vmctl-runner /opt/hermes-vmctl/bin/vmctl purge <deleted_name>
+vmctl purge <deleted_name>
 ```
 
 ## Recovery flow (if state drift exists)
 If ESXi has managed VM but state is missing:
 
 ```bash
-sudo -n -u vmctl-runner /opt/hermes-vmctl/bin/vmctl recover --dry-run
-sudo -n -u vmctl-runner /opt/hermes-vmctl/bin/vmctl recover --apply
+vmctl recover --dry-run
+vmctl recover --apply
 ```
 
 Then run delete/purge again.
@@ -143,7 +142,7 @@ Report concise facts:
 - residual check: `recover --dry-run` actions count
 
 ## Common Pitfalls
-1. Running vmctl as wrong user -> secrets permission errors.
+1. Running commands with hardcoded elevated wrappers from old docs.
 2. Purging by original VM name -> `deleted tombstone not found`.
 3. Reusing stale test names -> clone/file already exists errors.
 4. Treating orphan datastore folders as vmctl-managed state.
