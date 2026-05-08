@@ -17,6 +17,15 @@ This skill defines what the agent should do **right after vmctl installation** o
 
 Goal: quickly verify that vmctl is operational, run a safe smoke cycle, clean artifacts, and report status in operator-friendly form.
 
+Installation source (performed by operator):
+- Repository: https://github.com/bashrusakh/vmctl
+- Release archive: https://github.com/bashrusakh/vmctl/releases/download/v0.1.0/hermes-vmctl-v0.1.0.tar.gz
+
+Important:
+- This is a **post-install** skill.
+- If vmctl is not installed, the agent must stop and ask operator to install from the repo/release link above.
+- Do not attempt bootstrap installation requiring `sudo` unless operator explicitly grants/requests it.
+
 ## When to Use
 - vmctl was just installed or reinstalled.
 - ESXi/helper credentials are already configured.
