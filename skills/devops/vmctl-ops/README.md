@@ -80,15 +80,19 @@ If `vmctl` is missing, the skill requires the agent to stop and redirect operato
 
 ## Install this skill in Hermes
 
-```bash
-hermes skills install https://raw.githubusercontent.com/bashrusakh/vmctl/main/skills/devops/vmctl-ops/SKILL.md
-```
-
-Optional: install with confirmation bypass in non-interactive flow:
+Recommended (pinned to a reviewed commit):
 
 ```bash
-hermes skills install https://raw.githubusercontent.com/bashrusakh/vmctl/main/skills/devops/vmctl-ops/SKILL.md --yes
+hermes skills install https://raw.githubusercontent.com/bashrusakh/vmctl/13f3833098d1e79c6fad26e85f9efe3c38fa59e3/skills/devops/vmctl-ops/SKILL.md
 ```
+
+Alternative (pin to a release tag after review):
+
+```bash
+hermes skills install https://raw.githubusercontent.com/bashrusakh/vmctl/v0.1.1/skills/devops/vmctl-ops/SKILL.md
+```
+
+Avoid `--yes` unless the exact URL content has already been reviewed and approved.
 
 ---
 
