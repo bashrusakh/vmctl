@@ -8,6 +8,18 @@ metadata:
   hermes:
     tags: [vmctl, esxi, post-install, validation, operations]
     related_skills: [esxi-standalone-vmctl-delivery]
+    required_commands: [vmctl]
+    required_paths:
+      - /opt/hermes-vmctl/config/vmctl.yaml
+      - /opt/hermes-vmctl/state
+      - /opt/hermes-vmctl/state/deleted
+    credential_expectations:
+      - ESXi/helper credentials are preconfigured by the installer.
+      - vmctl runtime secrets are available to the execution user.
+    minimum_permissions:
+      - vmctl mode/preflight/doctor/list for diagnostics
+      - vmctl create/status for test VM lifecycle validation
+      - vmctl delete/purge/recover for state cleanup/reconciliation
 ---
 
 # vmctl Post-Install Operations
@@ -40,6 +52,18 @@ Do **not** use for:
 - Run as plain `vmctl` CLI (no privilege escalation or forced user switching in this skill).
 - Workdir: `/opt/hermes-vmctl`
 - Do not guess values; use config/secrets already deployed by installer.
+
+## Runtime Requirements
+- Required binary: `vmctl` must be available in PATH.
+- Required config path: `/opt/hermes-vmctl/config/vmctl.yaml`.
+- Required state paths: `/opt/hermes-vmctl/state` and `/opt/hermes-vmctl/state/deleted`.
+- Required credential context: ESXi/helper credentials are already configured by installer.
+
+## Minimum Permissions and Credential Scope
+- Minimum needed operations: `mode`, `preflight`, `doctor`, `list`, `create`, `status`, `delete`, `purge`, `recover`.
+- This skill must not be used for account/role management or bootstrap installation.
+- Expected credential scope should be limited to vmctl helper workflow and test VM lifecycle operations.
+- Prefer test-only VM names (`vmctl-test-*`) and avoid touching non-test resources unless operator explicitly asks for it.
 
 ## Quick Reference
 
