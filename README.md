@@ -4,7 +4,7 @@
 
 Simple, safe, and reliable virtual machine management for standalone ESXi
 
-![Version](https://img.shields.io/badge/version-0.1.0-blue?style=flat-square)
+![Version](https://img.shields.io/badge/version-0.1.1-blue?style=flat-square)
 ![Python](https://img.shields.io/badge/Python-3.8%2B-blue?style=flat-square)
 ![ESXi](https://img.shields.io/badge/ESXi-7.0%20Enterprise-brightgreen?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)
@@ -31,7 +31,7 @@ Simple, safe, and reliable virtual machine management for standalone ESXi
 
 ```bash
 # Download and install
-curl -L https://github.com/bashrusakh/vmctl/releases/download/v0.1.0/hermes-vmctl-v0.1.0.tar.gz -o hermes-vmctl.tar.gz
+curl -L https://github.com/bashrusakh/vmctl/releases/download/v0.1.1/hermes-vmctl-v0.1.1.tar.gz -o hermes-vmctl.tar.gz
 
 tar -xzf hermes-vmctl.tar.gz
 cd hermes-vmctl

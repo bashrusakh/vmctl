@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.1.1 - 2026-05-08
+
+### Changed
+- Renamed skill from `vmctl-post-install-ops` to `vmctl-ops`.
+- Added publication-focused skill README at `skills/devops/vmctl-ops/README.md`.
+- Standardized project docs and skill docs to English-only content.
+- Updated release links to `v0.1.1` archive.
+
+### Notes
+- This release is documentation + skill packaging refresh; core vmctl runtime behavior is unchanged.
+
 ### v0.1.0 - 2026-05-07 (Post-RC fixes)
 
 Technical hardening

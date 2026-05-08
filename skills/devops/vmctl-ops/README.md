@@ -74,7 +74,7 @@ If `vmctl` is missing, the skill requires the agent to stop and redirect operato
 ## Installation source (for operators)
 
 - Repository: https://github.com/bashrusakh/vmctl
-- Release archive: https://github.com/bashrusakh/vmctl/releases/download/v0.1.0/hermes-vmctl-v0.1.0.tar.gz
+- Release archive: https://github.com/bashrusakh/vmctl/releases/download/v0.1.1/hermes-vmctl-v0.1.1.tar.gz
 
 ---
 
