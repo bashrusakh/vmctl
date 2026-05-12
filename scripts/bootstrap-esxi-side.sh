@@ -30,13 +30,30 @@ log() {
 }
 
 is_root=0
+root_detect_reason=""
 if command -v id >/dev/null 2>&1; then
-  [ "$(id -u)" = "0" ] && is_root=1
+  if [ "$(id -u)" = "0" ]; then
+    is_root=1
+    root_detect_reason="id -u == 0"
+  fi
 fi
 if [ "$is_root" -ne 1 ] && [ "${USER:-}" = "root" ]; then
   is_root=1
+  root_detect_reason='USER=root'
 fi
-[ "$is_root" -eq 1 ] || die "Run on ESXi as root"
+
+if [ "$is_root" -ne 1 ]; then
+  echo "WARN: root was not detected via id/USER; probing effective privileges..." >&2
+  _root_probe="/etc/.vmctl-root-probe-$$"
+  if touch "$_root_probe" 2>/dev/null; then
+    rm -f "$_root_probe" || true
+    is_root=1
+    root_detect_reason='write probe /etc succeeded'
+  fi
+fi
+
+[ "$is_root" -eq 1 ] || die "Run on ESXi as root (or root-equivalent account)"
+log "Privilege check passed: $root_detect_reason"
 
 [ -n "$API_PASS" ] || die "API_PASS is required"
 [ -n "$SSH_PASS" ] || die "SSH_PASS is required"

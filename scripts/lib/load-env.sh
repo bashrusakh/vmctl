@@ -155,8 +155,24 @@ detect_hermes_ip() {
   fi
 
   if command -v ip >/dev/null 2>&1; then
-    HERMES_IP="$(ip route get "$ESXI_HOST" | awk '/src/ {for (i=1;i<=NF;i++) if ($i=="src") print $(i+1)}' | head -n1)"
-    export HERMES_IP
+    # Some iproute2 builds do not accept hostnames in `ip route get`.
+    # Try direct first, then resolve to IPv4 and retry.
+    local route_target="$ESXI_HOST"
+    local detected=""
+
+    detected="$(ip route get "$route_target" 2>/dev/null | awk '/src/ {for (i=1;i<=NF;i++) if ($i=="src") print $(i+1)}' | head -n1 || true)"
+
+    if [ -z "$detected" ] && command -v getent >/dev/null 2>&1; then
+      route_target="$(getent ahostsv4 "$ESXI_HOST" | awk 'NR==1 {print $1}')"
+      if [ -n "$route_target" ]; then
+        detected="$(ip route get "$route_target" 2>/dev/null | awk '/src/ {for (i=1;i<=NF;i++) if ($i=="src") print $(i+1)}' | head -n1 || true)"
+      fi
+    fi
+
+    if [ -n "$detected" ]; then
+      HERMES_IP="$detected"
+      export HERMES_IP
+    fi
   fi
 
   if [ -z "${HERMES_IP:-}" ]; then

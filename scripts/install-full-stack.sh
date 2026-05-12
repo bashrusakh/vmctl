@@ -354,8 +354,8 @@ copy_and_run_esxi_bootstrap() {
   prompt_esxi_root_pass_if_needed
   build_esxi_ssh_cmd_prefix
 
-  scp_opts=(-P "$ESXI_ROOT_PORT")
-  ssh_opts=(-p "$ESXI_ROOT_PORT")
+  scp_opts=(-P "$ESXI_ROOT_PORT" -o StrictHostKeyChecking=accept-new)
+  ssh_opts=(-p "$ESXI_ROOT_PORT" -o StrictHostKeyChecking=accept-new)
   if [ -n "${ESXI_ROOT_SSH_KEY:-}" ]; then
     scp_opts+=(-i "$ESXI_ROOT_SSH_KEY")
     ssh_opts+=(-i "$ESXI_ROOT_SSH_KEY")
