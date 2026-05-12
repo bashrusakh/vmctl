@@ -23,7 +23,7 @@ docs/BUGFIX_LIST_TEST_PHASE.md
 # https://github.com/bashrusakh/vmctl/releases/latest
 
 # Option B: pinned install (example)
-curl -L https://github.com/bashrusakh/vmctl/releases/latest/download/hermes-vmctl-v0.1.2.tar.gz -o hermes-vmctl.tar.gz
+curl -L https://github.com/bashrusakh/vmctl/releases/latest/download/hermes-vmctl-v0.1.4.tar.gz -o hermes-vmctl.tar.gz
 tar -xzf hermes-vmctl.tar.gz
 cd hermes-vmctl
 
