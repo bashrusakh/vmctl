@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.1.2 - 2026-05-12
+
+### Fixed
+- Installer now handles `ESXI_HOST` values provided as hostnames on systems where `ip route get <hostname>` fails: it resolves hostname to IPv4 and retries route-source detection.
+- ESXi bootstrap SSH/SCP calls now use `StrictHostKeyChecking=accept-new` to avoid interactive host-key confirmation hangs during first connection.
+- ESXi-side bootstrap privilege detection no longer relies only on `id`/`USER`; it now probes effective privileges and logs the reason when root-equivalent access is detected.
+
+### Notes
+- These changes harden canonical installation/bootstrap reliability on real-world ESXi environments without changing vmctl lifecycle command semantics.
+
 ## v0.1.1 - 2026-05-08
 
 ### Changed
