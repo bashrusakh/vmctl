@@ -23,6 +23,7 @@ import yaml
 
 BASE = pathlib.Path('/opt/hermes-vmctl')
 CFG_PATH = BASE / 'config' / 'vmctl.yaml'
+INSTALL_ENV_PATH = BASE / 'install.env'
 SECRETS_PATH = BASE / 'secrets' / 'esxi.env'
 STATE = BASE / 'state'
 LOCKS = BASE / 'locks'
@@ -58,6 +59,130 @@ def load_env(path=SECRETS_PATH):
             v = v.strip().strip('"').strip("'")
             env[k.strip()] = v
     return env
+
+
+def _csv_value(s: str):
+    return [x.strip() for x in (s or '').split(',') if x.strip()]
+
+
+def load_install_env(path=INSTALL_ENV_PATH):
+    p = pathlib.Path(path)
+    if not p.exists():
+        raise RuntimeError(f'install env not found: {path}')
+    env = {}
+    lines = p.read_text(encoding='utf-8').splitlines()
+    i = 0
+    while i < len(lines):
+        raw = lines[i]
+        line = raw.strip()
+        i += 1
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        k, v = line.split('=', 1)
+        k = k.strip()
+        v = v.strip()
+
+        if v.startswith("'") or v.startswith('"'):
+            q = v[0]
+            body = v[1:]
+            while True:
+                if body.endswith(q):
+                    body = body[:-1]
+                    break
+                if i >= len(lines):
+                    raise RuntimeError(f'unterminated quoted value in install.env for key={k}')
+                body += '\n' + lines[i]
+                i += 1
+            env[k] = body
+        else:
+            env[k] = v
+    return env
+
+
+def render_cfg_from_install_env(ienv: dict):
+    if 'VMCTL_TEMPLATES_JSON' not in ienv:
+        raise RuntimeError('install.env missing VMCTL_TEMPLATES_JSON')
+    templates = json.loads(ienv['VMCTL_TEMPLATES_JSON'])
+    datastores = {
+        ds: {
+            'path': f'/vmfs/volumes/{ds}',
+            'deleted_dir': '_deleted',
+            'templates_dir': '_templates',
+        }
+        for ds in _csv_value(ienv.get('DATASTORES', ''))
+    }
+    return {
+        'esxi': {
+            'host': ienv.get('ESXI_HOST'),
+            'user': ienv.get('SSH_USER'),
+            'ssh_port': 22,
+            'ssh_key': f"{ienv.get('APP_DIR', '/opt/hermes-vmctl')}/secrets/vmctl_ssh_key",
+            'default_datastore': ienv.get('DEFAULT_DATASTORE'),
+            'default_network': ienv.get('DEFAULT_NETWORK'),
+            'vm_disk_format': ienv.get('VM_DISK_FORMAT', 'thin'),
+        },
+        'security': {'allow_direct_esxi': False},
+        'datastores': datastores,
+        'templates': templates,
+        'allowed_networks': _csv_value(ienv.get('ALLOWED_NETWORKS', '')),
+        'limits': {
+            'max_cpu': int(ienv.get('MAX_CPU', '8')),
+            'max_ram_mb': int(ienv.get('MAX_RAM_MB', '32768')),
+            'max_disk_gb': int(ienv.get('MAX_DISK_GB', '300')),
+            'max_vms_total': int(ienv.get('MAX_VMS_TOTAL', '20')),
+            'max_vms_per_request': int(ienv.get('MAX_VMS_PER_REQUEST', '1')),
+        },
+        'protected_vms': _csv_value(ienv.get('PROTECTED_VMS', '')),
+        'delete': {'deleted_dir': '_deleted'},
+    }
+
+
+def _drift_summary(cfg: dict, expected: dict):
+    mismatches = []
+
+    if cfg.get('esxi', {}).get('default_datastore') != expected.get('esxi', {}).get('default_datastore'):
+        mismatches.append(
+            f"esxi.default_datastore cfg={cfg.get('esxi', {}).get('default_datastore')!r} env={expected.get('esxi', {}).get('default_datastore')!r}"
+        )
+
+    if set(cfg.get('datastores', {}).keys()) != set(expected.get('datastores', {}).keys()):
+        mismatches.append(
+            f"datastores keys cfg={sorted(cfg.get('datastores', {}).keys())} env={sorted(expected.get('datastores', {}).keys())}"
+        )
+
+    cfg_templates = cfg.get('templates', {})
+    exp_templates = expected.get('templates', {})
+    if set(cfg_templates.keys()) != set(exp_templates.keys()):
+        mismatches.append(f"templates keys cfg={sorted(cfg_templates.keys())} env={sorted(exp_templates.keys())}")
+
+    for tname in sorted(set(cfg_templates.keys()) & set(exp_templates.keys())):
+        c = cfg_templates.get(tname, {})
+        e = exp_templates.get(tname, {})
+        for field in ('datastore', 'path', 'vmx', 'disk'):
+            if c.get(field) != e.get(field):
+                mismatches.append(f"template.{tname}.{field} cfg={c.get(field)!r} env={e.get(field)!r}")
+        c_allowed = sorted(c.get('allowed_datastores') or [])
+        e_allowed = sorted(e.get('allowed_datastores') or [])
+        if c_allowed != e_allowed:
+            mismatches.append(f"template.{tname}.allowed_datastores cfg={c_allowed} env={e_allowed}")
+
+    ok = len(mismatches) == 0
+    details = 'in sync' if ok else '; '.join(mismatches[:8])
+    if len(mismatches) > 8:
+        details += f"; ... +{len(mismatches)-8} more"
+    return ok, details
+
+
+def assert_no_install_env_drift(cfg):
+    ienv = load_install_env()
+    expected = render_cfg_from_install_env(ienv)
+    ok, details = _drift_summary(cfg, expected)
+    if not ok:
+        raise RuntimeError(
+            'install.env drift detected: '
+            + details
+            + '. Run: sudo scripts/install-full-stack.sh --env /opt/hermes-vmctl/install.env'
+        )
 
 
 def audit_log(operation, vm_name, state_uuid, stage, result, error=None, next_action=None):
@@ -553,6 +678,7 @@ def _inventory_from_getallvms(cfg, env, warnings=None):
 
 def create_vm(args):
     cfg = load_config(); env = load_env()
+    assert_no_install_env_drift(cfg)
     helper_preflight_ok(env)
     validate_vm_name(args.name)
     hostname = args.hostname or re.sub(r'[^a-z0-9-]', '-', args.name.lower())
@@ -931,6 +1057,12 @@ def preflight(args):
 
     # Strict checks
     try:
+        assert_no_install_env_drift(cfg)
+        checks.append(('config_drift_install_env', True, 'in sync'))
+    except Exception as e:
+        checks.append(('config_drift_install_env', False, str(e)))
+
+    try:
         run_govc(env, ['version'])
         govc_ok = True
         checks.append(('govc_version', True, 'ok'))
@@ -996,6 +1128,23 @@ def preflight(args):
         raise SystemExit(2)
 
 
+
+
+def cmd_sync_check(args):
+    cfg = load_config()
+    ienv = load_install_env()
+    expected = render_cfg_from_install_env(ienv)
+    ok, details = _drift_summary(cfg, expected)
+    out = {
+        'ok': ok,
+        'details': details,
+        'config_path': str(CFG_PATH),
+        'install_env_path': str(INSTALL_ENV_PATH),
+        'apply_hint': 'sudo scripts/install-full-stack.sh --env /opt/hermes-vmctl/install.env',
+    }
+    print(json.dumps(out, ensure_ascii=False, indent=2))
+    if not ok:
+        raise SystemExit(2)
 
 
 def _effective_direct_mode(cfg, args):
@@ -1080,6 +1229,12 @@ def cmd_doctor(args):
         checks.append(('direct_mode_config_warning', True, 'WARNING: security.allow_direct_esxi=true; direct mode can be enabled with CLI flag'))
 
     try:
+        assert_no_install_env_drift(cfg)
+        checks.append(('config_drift_install_env', True, 'in sync'))
+    except Exception as e:
+        checks.append(('config_drift_install_env', False, str(e)))
+
+    try:
         run_govc(env, ['version'])
         checks.append(('govc_version', True, 'ok'))
     except Exception as e:
@@ -1135,6 +1290,7 @@ def main():
     sub.add_parser('preflight')
     sub.add_parser('mode')
     sub.add_parser('doctor')
+    sub.add_parser('sync-check')
 
     args = p.parse_args()
     if args.version:
@@ -1163,6 +1319,8 @@ def main():
         cmd_mode(args)
     elif args.cmd == 'doctor':
         cmd_doctor(args)
+    elif args.cmd == 'sync-check':
+        cmd_sync_check(args)
     else:
         p.print_help(); sys.exit(1)
 

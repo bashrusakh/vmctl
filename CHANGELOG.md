@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.1.3 - 2026-05-12
+
+### Added
+- New `vmctl sync-check` command to explicitly validate config sync between installer source (`/opt/hermes-vmctl/install.env`) and runtime config (`/opt/hermes-vmctl/config/vmctl.yaml`).
+
+### Changed
+- `vmctl create` now performs a strict install-env drift check before helper operations and fails fast with an actionable remediation hint.
+- `vmctl preflight` now includes strict `config_drift_install_env` validation.
+- `vmctl doctor` now includes strict `config_drift_install_env` validation.
+
+### Fixed
+- `install.env` parsing in runtime drift checks now supports multiline quoted values (required for `VMCTL_TEMPLATES_JSON`).
+
+### Notes
+- This release prevents silent config/helper drift (for example, mismatched source datastore allowlists) from reaching VM create execution.
+
 ## v0.1.2 - 2026-05-12
 
 ### Fixed
