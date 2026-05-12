@@ -131,15 +131,8 @@ role_exists() {
   vim-cmd vimsvc/auth/roles | grep -q "name = \"$1\""
 }
 
-create_api_role() {
-  if role_exists "$API_ROLE"; then
-    log "Role exists: $API_ROLE"
-    return 0
-  fi
-
-  log "Creating API role: $API_ROLE"
-
-  API_PRIVS="
+api_role_privs() {
+  cat <<'EOF'
 System.Anonymous
 System.Read
 System.View
@@ -164,10 +157,34 @@ VirtualMachine.Inventory.CreateFromExisting
 VirtualMachine.Inventory.Delete
 VirtualMachine.Inventory.Register
 VirtualMachine.Inventory.Unregister
-"
+EOF
+}
 
+create_role_if_missing() {
+  local role_name="$1"
+  local role_privs="$2"
+
+  if role_exists "$role_name"; then
+    return 0
+  fi
+
+  log "Creating role: $role_name"
   # shellcheck disable=SC2086
-  vim-cmd vimsvc/auth/role_add "$API_ROLE" $API_PRIVS
+  vim-cmd vimsvc/auth/role_add "$role_name" $role_privs >/tmp/vmctl-role-add.out 2>&1 || {
+    cat /tmp/vmctl-role-add.out >&2
+    die "Failed to create role: $role_name"
+  }
+}
+
+create_api_role() {
+  API_PRIVS="$(api_role_privs)"
+
+  if role_exists "$API_ROLE"; then
+    log "Role exists: $API_ROLE (leave as-is; no role mutation on this ESXi)"
+    return 0
+  fi
+
+  create_role_if_missing "$API_ROLE" "$API_PRIVS"
 }
 
 add_permission() {
@@ -185,6 +202,48 @@ add_permission() {
       die "Failed to add permission"
     fi
   }
+}
+
+find_datastore_entity() {
+  ds_name="$1"
+
+  vim-cmd hostsvc/datastore/listsummary | awk -v target="$ds_name" '
+    /datastore = .*vim\.Datastore:/ {
+      line=$0
+      sub(/^.*\x27/, "", line)
+      sub(/\x27.*$/, "", line)
+      entity=line
+    }
+    /name = / {
+      n=$0
+      sub(/^.*name = "/, "", n)
+      sub(/".*$/, "", n)
+      if (n == target && entity != "") {
+        print entity
+        exit
+      }
+    }
+  '
+}
+
+add_datastore_permissions() {
+  principal="$1"
+  role="$2"
+
+  OLDIFS="$IFS"
+  IFS=','
+  for ds in $DATASTORES; do
+    ds="$(echo "$ds" | sed 's/^ *//;s/ *$//')"
+    [ -n "$ds" ] || continue
+
+    entity="$(find_datastore_entity "$ds")"
+    if [ -z "$entity" ]; then
+      die "Could not resolve datastore entity for: $ds"
+    fi
+
+    add_permission "$entity" "$principal" "$role"
+  done
+  IFS="$OLDIFS"
 }
 
 allow_ssh_access_conf() {
@@ -477,9 +536,11 @@ main() {
 
   add_permission "vim.Folder:ha-folder-root" "$API_USER" "$API_ROLE"
   add_permission "vim.ComputeResource:ha-compute-res" "$API_USER" "$API_ROLE"
+  add_datastore_permissions "$API_USER" "$API_ROLE"
 
   add_permission "vim.Folder:ha-folder-root" "$SSH_USER" "$SSH_ROLE"
   add_permission "vim.ComputeResource:ha-compute-res" "$SSH_USER" "$SSH_ROLE"
+  add_datastore_permissions "$SSH_USER" "$SSH_ROLE"
 
   allow_ssh_access_conf "$SSH_USER"
   install_helper

@@ -17,6 +17,7 @@ from legacy_direct_esxi import run_ssh
 import sys
 import tempfile
 import uuid
+import urllib.parse
 from contextlib import contextmanager
 
 import yaml
@@ -229,9 +230,42 @@ def helper_preflight_ok(env):
         raise RuntimeError(f"ESXi helper preflight failed: rc={cp.returncode}, out={out!r}, err={err!r}")
 
 
+def _normalize_govc_auth(env_map):
+    """
+    Some govc builds mis-handle GOVC_USERNAME/GOVC_PASSWORD split credentials
+    and emit errors like: "open <username>: permission denied".
+    Normalize by embedding credentials into GOVC_URL when URL has no userinfo.
+    """
+    e = dict(env_map)
+    url = (e.get('GOVC_URL') or '').strip()
+    user = (e.get('GOVC_USERNAME') or '').strip()
+    pwd = e.get('GOVC_PASSWORD') or ''
+    if not url or not user:
+        return e
+    try:
+        p = urllib.parse.urlsplit(url)
+        if p.username is None:
+            host = p.hostname or ''
+            if not host:
+                return e
+            user_enc = urllib.parse.quote(user, safe='')
+            pwd_enc = urllib.parse.quote(pwd, safe='')
+            auth = f"{user_enc}:{pwd_enc}@{host}"
+            if p.port:
+                auth += f":{p.port}"
+            new_url = urllib.parse.urlunsplit((p.scheme or 'https', auth, p.path or '', p.query, p.fragment))
+            e['GOVC_URL'] = new_url
+            e.pop('GOVC_USERNAME', None)
+            e.pop('GOVC_PASSWORD', None)
+    except Exception:
+        return e
+    return e
+
+
 def run_govc(env, args, check=True):
     e = os.environ.copy()
     e.update(env)
+    e = _normalize_govc_auth(e)
     govc_bin = e.get('GOVC_BIN') or shutil.which('govc') or '/usr/local/bin/govc'
     return subprocess.run([govc_bin] + args, check=check, capture_output=True, text=True, env=e)
 
@@ -538,6 +572,18 @@ def _private_key_from_pub_path(path):
     return p[:-4] if p.endswith('.pub') else p
 
 
+def _validate_private_key_permissions(key_path):
+    p = pathlib.Path(key_path)
+    if not p.exists():
+        raise RuntimeError(f'private key not found: {key_path}')
+    st_mode = p.stat().st_mode & 0o777
+    if st_mode & 0o077:
+        raise RuntimeError(
+            f'insecure private key permissions for {key_path}: {oct(st_mode)}; '
+            f'require 0o600 (run: chmod 600 {shlex.quote(str(p))})'
+        )
+
+
 def _ssh_ready(ip, username, key_path, timeout_sec=300, interval_sec=5):
     key_path = _private_key_from_pub_path(key_path)
     deadline = dt.datetime.now(dt.timezone.utc).timestamp() + timeout_sec
@@ -693,7 +739,9 @@ def create_vm(args):
         raise RuntimeError('static IP is not supported in v1. Use --ip dhcp and omit --gateway/--dns')
     dns = None
 
-    ssh_key = pathlib.Path(os.path.expanduser(args.ssh_key_file)).read_text(encoding='utf-8').strip()
+    ssh_key_path = pathlib.Path(os.path.expanduser(args.ssh_key_file))
+    _validate_private_key_permissions(_private_key_from_pub_path(str(ssh_key_path)))
+    ssh_key = ssh_key_path.read_text(encoding='utf-8').strip()
     state_uuid = str(uuid.uuid4())
     instance_id = f"vmctl-{args.name}-{state_uuid[:8]}"
     target_ds = resolve_target_datastore(cfg, args.datastore)

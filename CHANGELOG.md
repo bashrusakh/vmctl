@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.1.4 - 2026-05-12
+
+### Fixed
+- ESXi bootstrap datastore permission assignment now correctly resolves datastore entities from `vim-cmd hostsvc/datastore/listsummary` when ESXi returns UUID-style IDs (`vim.Datastore:<uuid>`), not only legacy `datastore-XX` IDs.
+- `vmctl create` govc auth path now normalizes split credentials (`GOVC_USERNAME`/`GOVC_PASSWORD`) into URL userinfo when needed, preventing `govc datastore.download` failures with `open <user>: permission denied` on affected govc builds.
+- `vmctl create` now fails fast on insecure or missing private SSH key files used for readiness checks, with explicit remediation (`chmod 600 ...`) instead of a late generic SSH readiness failure.
+
+### Changed
+- Runtime govc invocation now applies auth normalization consistently before every govc call.
+
 ## v0.1.3 - 2026-05-12
 
 ### Added
