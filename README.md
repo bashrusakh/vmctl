@@ -31,7 +31,7 @@ Simple, safe, and reliable virtual machine management for standalone ESXi
 
 ```bash
 # Download and install
-curl -L https://github.com/bashrusakh/vmctl/releases/download/v0.1.1/hermes-vmctl-v0.1.1.tar.gz -o hermes-vmctl.tar.gz
+curl -L https://github.com/bashrusakh/vmctl/releases/latest/download/hermes-vmctl-v0.1.2.tar.gz -o hermes-vmctl.tar.gz
 
 tar -xzf hermes-vmctl.tar.gz
 cd hermes-vmctl

@@ -89,7 +89,7 @@ hermes skills install https://raw.githubusercontent.com/bashrusakh/vmctl/13f3833
 Alternative (pin to a release tag after review):
 
 ```bash
-hermes skills install https://raw.githubusercontent.com/bashrusakh/vmctl/v0.1.1/skills/devops/vmctl-ops/SKILL.md
+hermes skills install https://raw.githubusercontent.com/bashrusakh/vmctl/v0.1.2/skills/devops/vmctl-ops/SKILL.md
 ```
 
 Avoid `--yes` unless the exact URL content has already been reviewed and approved.
