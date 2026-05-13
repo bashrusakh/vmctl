@@ -20,6 +20,8 @@ templates:
     vmx: template_alma10_cert.vmx
     disk: template_alma10_cert.vmdk
     guest_os: rhel9-64
+    cpu_hot_add: true
+    memory_hot_add: true
     allowed_datastores:
       - datastore1
 

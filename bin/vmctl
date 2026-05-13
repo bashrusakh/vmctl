@@ -434,12 +434,14 @@ def render_userdata(username, ssh_key):
     return '#cloud-config\n' + yaml.safe_dump(ud, sort_keys=False)
 
 
-def sanitize_or_render_vmx(template_vmx_text, vm_name, cpu, ram_mb, network, state_uuid, instance_id, created_at):
+def sanitize_or_render_vmx(template_vmx_text, vm_name, cpu, ram_mb, network, state_uuid, instance_id, created_at, cpu_hot_add=True, memory_hot_add=True):
     forced = {
         'displayName': vm_name, 'numvcpus': str(cpu), 'memSize': str(ram_mb),
         'scsi0:0.fileName': f'{vm_name}.vmdk', 'nvram': f'{vm_name}.nvram', 'extendedConfigFile': f'{vm_name}.vmxf',
         'ethernet0.present': 'TRUE', 'ethernet0.virtualDev': 'vmxnet3', 'ethernet0.networkName': network,
         'ethernet0.addressType': 'generated', 'ethernet0.startConnected': 'TRUE',
+        'vcpu.hotadd': 'TRUE' if cpu_hot_add else 'FALSE',
+        'mem.hotadd': 'TRUE' if memory_hot_add else 'FALSE',
         'guestinfo.vmctl.managed': 'true', 'guestinfo.vmctl.owner': 'hermes', 'guestinfo.vmctl.name': vm_name,
         'guestinfo.vmctl.state_uuid': state_uuid, 'guestinfo.vmctl.instance_id': instance_id,
         'guestinfo.vmctl.created_at': created_at,
@@ -473,7 +475,7 @@ def sanitize_or_render_vmx(template_vmx_text, vm_name, cpu, ram_mb, network, sta
 
 
 
-def render_vmx_minimal(vm_name, cpu, ram_mb, network, state_uuid, instance_id, created_at, guest_os):
+def render_vmx_minimal(vm_name, cpu, ram_mb, network, state_uuid, instance_id, created_at, guest_os, cpu_hot_add=True, memory_hot_add=True):
     forced = {
         'config.version': '8',
         'virtualHW.version': '19',
@@ -484,8 +486,8 @@ def render_vmx_minimal(vm_name, cpu, ram_mb, network, state_uuid, instance_id, c
         'memSize': str(ram_mb),
         'vhv.enable': 'TRUE',
         'vvtd.enable': 'TRUE',
-        'vcpu.hotadd': 'TRUE',
-        'mem.hotadd': 'TRUE',
+        'vcpu.hotadd': 'TRUE' if cpu_hot_add else 'FALSE',
+        'mem.hotadd': 'TRUE' if memory_hot_add else 'FALSE',
         'floppy0.present': 'FALSE',
         'pciBridge0.present': 'TRUE',
         'pciBridge0.pciSlotNumber': '17',
@@ -812,11 +814,36 @@ def create_vm(args):
                         except OSError:
                             pass
 
+                cpu_hot_add = str(t.get('cpu_hot_add', True)).strip().lower() in ('1', 'true', 'yes', 'on')
+                memory_hot_add = str(t.get('memory_hot_add', True)).strip().lower() in ('1', 'true', 'yes', 'on')
+
                 if template_vmx_text:
-                    vmx = sanitize_or_render_vmx(template_vmx_text, args.name, args.cpu, args.ram_mb, args.network, state_uuid, instance_id, st['created_at'])
+                    vmx = sanitize_or_render_vmx(
+                        template_vmx_text,
+                        args.name,
+                        args.cpu,
+                        args.ram_mb,
+                        args.network,
+                        state_uuid,
+                        instance_id,
+                        st['created_at'],
+                        cpu_hot_add=cpu_hot_add,
+                        memory_hot_add=memory_hot_add,
+                    )
                 else:
                     guest_os = t.get('guest_os') or ('rhel9-64' if args.template == 'alma10' else 'otherLinux64Guest')
-                    vmx = render_vmx_minimal(args.name, args.cpu, args.ram_mb, args.network, state_uuid, instance_id, st['created_at'], guest_os)
+                    vmx = render_vmx_minimal(
+                        args.name,
+                        args.cpu,
+                        args.ram_mb,
+                        args.network,
+                        state_uuid,
+                        instance_id,
+                        st['created_at'],
+                        guest_os,
+                        cpu_hot_add=cpu_hot_add,
+                        memory_hot_add=memory_hot_add,
+                    )
 
                 local_vmx = None
                 try:

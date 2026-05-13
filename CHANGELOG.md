@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.1.5 - 2026-05-13
+
+### Added
+- Template-level hot-add controls in `config/vmctl.yaml`:
+  - `templates.<name>.cpu_hot_add` (boolean, default `true`)
+  - `templates.<name>.memory_hot_add` (boolean, default `true`)
+
+### Changed
+- VMX rendering now enforces hot-add flags from template config in both VMX generation paths:
+  - template-VMX sanitize path
+  - minimal VMX fallback path
+- `vcpu.hotadd` and `mem.hotadd` are now explicitly set from template config instead of being always-on constants.
+
+### Verified
+- End-to-end `vmctl create` smoke test passed after the change (`status: ready`), confirming provisioning remains stable with configurable hot-add behavior.
+
 ## v0.1.4 - 2026-05-12
 
 ### Fixed
