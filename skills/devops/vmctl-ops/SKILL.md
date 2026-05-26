@@ -49,9 +49,14 @@ Do **not** use for:
 - production VM provisioning with non-test names.
 
 ## Default Execution Mode
-- Run as plain `vmctl` CLI (no privilege escalation or forced user switching in this skill).
 - Workdir: `/opt/hermes-vmctl`
 - Do not guess values; use config/secrets already deployed by installer.
+- On installer-managed hardened installs, do **not** validate runtime behavior by running `/opt/hermes-vmctl/bin/vmctl` directly as the interactive user.
+- Canonical validation path is the installed runner context:
+  ```bash
+  sudo -u vmctl-runner -H /opt/hermes-vmctl/bin/vmctl <subcommand>
+  ```
+- If plain `vmctl` already resolves to a wrapper/shim that executes as `vmctl-runner`, using plain `vmctl` is acceptable. Otherwise, use the explicit runner form above.
 
 ## Runtime Requirements
 - Required binary: `vmctl` must be available in PATH.
@@ -69,14 +74,14 @@ Do **not** use for:
 
 ```bash
 # baseline checks
-vmctl mode
-vmctl preflight
-vmctl doctor
-vmctl list --all
+sudo -u vmctl-runner -H /opt/hermes-vmctl/bin/vmctl mode
+sudo -u vmctl-runner -H /opt/hermes-vmctl/bin/vmctl preflight
+sudo -u vmctl-runner -H /opt/hermes-vmctl/bin/vmctl doctor
+sudo -u vmctl-runner -H /opt/hermes-vmctl/bin/vmctl list --all
 
 # recover state drift
-vmctl recover --dry-run
-vmctl recover --apply
+sudo -u vmctl-runner -H /opt/hermes-vmctl/bin/vmctl recover --dry-run
+sudo -u vmctl-runner -H /opt/hermes-vmctl/bin/vmctl recover --apply
 ```
 
 ## Procedure
@@ -85,15 +90,16 @@ vmctl recover --apply
 Run in order:
 
 ```bash
-vmctl mode
-vmctl preflight
-vmctl doctor
-vmctl list --all
+sudo -u vmctl-runner -H /opt/hermes-vmctl/bin/vmctl mode
+sudo -u vmctl-runner -H /opt/hermes-vmctl/bin/vmctl preflight
+sudo -u vmctl-runner -H /opt/hermes-vmctl/bin/vmctl doctor
+sudo -u vmctl-runner -H /opt/hermes-vmctl/bin/vmctl list --all
 ```
 
 Rules:
 1. If `preflight` or `doctor` is red -> stop and report blocker.
 2. If `list --all` shows pending/failed from old runs, recover/cleanup before new create-tests.
+3. Do not treat interactive-user runs of `/opt/hermes-vmctl/bin/vmctl` as authoritative on hardened installs; the authoritative health gate is the runner-context execution above.
 
 ## Phase 2 — Safe smoke create test
 Use a test name only:

@@ -45,8 +45,12 @@ If `vmctl` is missing, the skill requires the agent to stop and redirect operato
 
 ## Safety model
 
-- **No privilege escalation guidance** in skill commands.
-- Uses plain `vmctl ...` command style.
+- Uses the installer-managed runtime context for authoritative checks on hardened installs.
+- Canonical validation path:
+  ```bash
+  sudo -u vmctl-runner -H /opt/hermes-vmctl/bin/vmctl <subcommand>
+  ```
+- Plain `vmctl ...` is only acceptable when it resolves to the installed wrapper/shim that already executes as `vmctl-runner`.
 - Enforces test-only naming (`vmctl-test-*`).
 - Requires cleanup unless operator explicitly asks to keep test VM.
 
@@ -54,7 +58,7 @@ If `vmctl` is missing, the skill requires the agent to stop and redirect operato
 
 ## Typical workflow
 
-1. Health gate (`mode`, `preflight`, `doctor`, `list --all`)
+1. Health gate (`mode`, `preflight`, `doctor`, `list --all`) via `vmctl-runner` runtime context
 2. Smoke create/status on a test VM
 3. Delete and purge test resources
 4. Optional recover pass for residual drift
@@ -68,6 +72,9 @@ If `vmctl` is missing, the skill requires the agent to stop and redirect operato
 - vmctl config/secrets already deployed
 - ESXi/helper credentials already configured
 - Access to `/opt/hermes-vmctl` state directory (for tombstone lookup)
+- On hardened installs, either:
+  - `vmctl` resolves to the installed wrapper/shim that executes as `vmctl-runner`, or
+  - the operator can run `sudo -u vmctl-runner -H /opt/hermes-vmctl/bin/vmctl ...`
 
 ---
 

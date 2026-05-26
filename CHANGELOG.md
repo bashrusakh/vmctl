@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- Clarified `skills/devops/vmctl-ops` execution contract for hardened installs: authoritative validation must run in the installer-managed `vmctl-runner` context, not by executing `/opt/hermes-vmctl/bin/vmctl` directly as the interactive user.
+- Updated `skills/devops/vmctl-ops/SKILL.md` health-gate examples to use:
+  - `sudo -u vmctl-runner -H /opt/hermes-vmctl/bin/vmctl mode`
+  - `sudo -u vmctl-runner -H /opt/hermes-vmctl/bin/vmctl preflight`
+  - `sudo -u vmctl-runner -H /opt/hermes-vmctl/bin/vmctl doctor`
+  - `sudo -u vmctl-runner -H /opt/hermes-vmctl/bin/vmctl list --all`
+- Updated `skills/devops/vmctl-ops/README.md` to describe the hardened-install runner model and remove misleading guidance that implied plain interactive-user `vmctl` execution was authoritative.
+
 ## v0.1.5 - 2026-05-13
 
 ### Added
