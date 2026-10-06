@@ -1,36 +1,25 @@
 name: Issue Triage
 
-# Thin caller shim for the centralized reusable triage master in bashrusakh/.github.
-# Mission, authority rules, mutation surface, managed labels, and Policy-SHA contract
-# resolution all live in the master; this file only declares when to call it and what
-# the calling job grants.
-#
-# This is an ADD-ON trial: the existing self-contained .github/workflows/issue-triage.md
-# on branch feat/metadata-only-triage is left untouched and is not replaced here.
-#
-# Note: issues-triggered workflows only run from the repository default branch, so this
-# shim is inert until it is merged. It can therefore be reviewed and validated without
-# triaging anything.
+# Thin caller shim for the reusable triage master in bashrusakh/.github, pinned at
+# e7add3fbe795d151702f9e13740bf9786aba5a84 (re-pinned from the earlier efb7a477… trial,
+# which pointed at a lock that failed closed on nested contract paths).
+# The contract is read from THIS repository: the master resolves this repository's
+# default-branch head, fetches the contract_files below from it, and fails closed before
+# the agent starts when a listed file is missing. vmctl's main has CONTRIBUTING.md but no
+# AGENTS.md and no .github/triage-policy.md, so only CONTRIBUTING.md is listed.
+# The permissions are the union the called workflow's jobs require; issues:write and
+# pull-requests:write are the write scopes (actions:read/contents:read cover the rest).
+# Inert until merged: issues-triggered workflows only run from the default branch.
 on:
   issues:
     types: [opened, reopened]
   workflow_dispatch:
     inputs:
       issue_number:
-        description: "Issue number to triage when dispatched manually"
+        description: "Informational issue number for a manual run."
         required: false
         type: string
 
-# The called workflow's jobs request, at most:
-#   activation   actions: read, contents: read
-#   agent        contents: read, issues: read
-#   detection    contents: read
-#   safe_outputs issues: write, pull-requests: write
-#   conclusion   issues: write, pull-requests: write
-# A reusable workflow can only use permissions the calling job already holds, and GitHub
-# validates each nested job against this block when the run starts, so the caller must
-# grant the full union or the run fails before any job runs. `issues: write` also covers
-# the agent's `issues: read` requirement.
 permissions:
   actions: read
   contents: read
@@ -39,22 +28,8 @@ permissions:
 
 jobs:
   triage:
-    uses: bashrusakh/.github/.github/workflows/triage-issue.lock.yml@efb7a477f832d0667763a5b5fb1e9c4aaffd26f0
-    # The master's BYOK engine reads OLLAMA_API_KEY, which is a repository secret on this
-    # repository. Pass it by name: the master declares it under on.workflow_call.secrets.
-    # Named passing is least-privilege and is documented to work across repositories,
-    # unlike `secrets: inherit` (documented for same organization/enterprise only).
+    uses: bashrusakh/.github/.github/workflows/triage-issue.lock.yml@e7add3fbe795d151702f9e13740bf9786aba5a84
     secrets:
       OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
     with:
-      # Must list only files that exist in THIS repository at its DEFAULT-BRANCH head:
-      # the master resolves the default-branch head and fails closed, before the agent
-      # starts, if a listed file is missing. An issues-triggered workflow only runs from
-      # the default branch, so the port branch's files do not count.
-      # Verified at vmctl main (1e5cfa0): CONTRIBUTING.md present; AGENTS.md absent;
-      # `.github/triage-policy.md` absent (it lands on main only with the metadata-only
-      # triage work in PR #2 / branch feat/metadata-only-triage). Adding the policy here
-      # now would fail closed. Extend this list to
-      # ".github/triage-policy.md CONTRIBUTING.md" once PR #2 merges, so triage reads the
-      # repository's own triage policy.
       contract_files: "CONTRIBUTING.md"
