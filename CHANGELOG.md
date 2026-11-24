@@ -11,6 +11,7 @@
   - `sudo -u vmctl-runner -H /opt/hermes-vmctl/bin/vmctl list --all`
 - Updated `skills/devops/vmctl-ops/README.md` to describe the hardened-install runner model and remove misleading guidance that implied plain interactive-user `vmctl` execution was authoritative.
 - `vmctl create --hostname` now accepts dot-separated FQDN hostnames (for example `vless.itc.local`) in addition to single DNS labels, and rejects hostnames containing control characters such as a trailing newline.
+- `vmctl create --disk-gb N` no longer fails when `N` equals the template disk size: the ESXi-side helper compares the requested size with the clone's current virtual capacity and skips the expand when both already match. Growing to a larger size still expands the disk, and requesting a smaller size still fails, with the ESXi-side helper's error naming the current and the requested size. The change lives in the ESXi-side helper, so the ESXi host must be re-bootstrapped (`scripts/bootstrap-esxi-side.sh`) for the fix to take effect.
 
 ## v0.1.5 - 2026-05-13
 
