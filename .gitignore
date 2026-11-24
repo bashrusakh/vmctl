@@ -23,3 +23,6 @@ secrets/esxi.env
 secrets/generated-passwords.txt
 secrets/vmctl_ssh_key
 .govmomi/sessions
+
+# Local agent tooling
+.graymatter/
