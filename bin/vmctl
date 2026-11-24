@@ -216,10 +216,58 @@ def _ssh_target(env):
     return user, host, port, key
 
 
+def _scrub_ssh_output(text, *, user, host, port, key) -> str:
+    """Redact the ssh transport identifiers from ssh-produced output."""
+    if not text:
+        return text
+    if key:
+        text = text.replace(key, '<redacted>')
+    if user and host:
+        text = text.replace(f'{user}@{host}', '<redacted>')
+    if host:
+        text = re.sub(r'(?<![0-9A-Za-z_-])' + re.escape(host) + r'(?![0-9A-Za-z_-])', '<redacted>', text)
+    if port:
+        # ssh names the port as "port <N>"; a bare number match would mangle
+        # unrelated numbers in the diagnostic.
+        text = re.sub(r'(?<![0-9A-Za-z_-])port\s+' + re.escape(str(port)) + r'(?![0-9A-Za-z_-])', 'port <redacted>', text)
+    return text
+
+
+def _helper_error_detail(stderr, stdout, *, user, host, port, key) -> str:
+    """Render the helper's own output as one line, with ssh transport identifiers redacted."""
+    for raw in (stderr, stdout):
+        if not raw:
+            continue
+        text = raw.decode('utf-8', errors='replace') if isinstance(raw, (bytes, bytearray)) else str(raw)
+        text = _scrub_ssh_output(text, user=user, host=host, port=port, key=key)
+        text = ' '.join(text.split())
+        if text:
+            return text
+    return 'no output captured'
+
+
+def _helper_error_target(args, *, user, host, port, key) -> str:
+    """Render the helper's own argument vector, with ssh transport identifiers redacted."""
+    text = _scrub_ssh_output(' '.join(str(a) for a in args), user=user, host=host, port=port, key=key)
+    return ' '.join(text.split()) or 'helper'
+
+
 def run_esxi_helper(env, args: list[str], stdin: bytes | None = None, check: bool = True) -> CompletedProcess:
     user, host, port, key = _ssh_target(env)
     cmd = ['ssh', '-i', key, '-p', port, f'{user}@{host}', *args]
-    return subprocess.run(cmd, input=stdin, check=check, capture_output=True)
+    try:
+        return subprocess.run(cmd, input=stdin, check=check, capture_output=True)
+    except subprocess.CalledProcessError as e:
+        # The helper reports why it failed on stderr; surface that reason
+        # instead of only the generic non-zero exit status.
+        target = _helper_error_target(args, user=user, host=host, port=port, key=key)
+        detail = _helper_error_detail(e.stderr, e.stdout, user=user, host=host, port=port, key=key)
+        # ssh exits 255 when it fails itself (connect, auth, host key); a remote
+        # helper failure is passed through as the helper's own exit status.
+        # `from None`: the chained CalledProcessError renders the whole ssh argv.
+        if e.returncode == 255:
+            raise RuntimeError(f'ESXi SSH transport failure while attempting helper {target}: rc={e.returncode}; detail={detail}') from None
+        raise RuntimeError(f'ESXi helper {target} failed: rc={e.returncode}; detail={detail}') from None
 
 
 
@@ -228,8 +276,16 @@ def helper_preflight_ok(env):
     cp = run_esxi_helper(env, ['preflight'], check=False)
     out = cp.stdout.decode('utf-8', errors='replace').strip()
     if cp.returncode != 0 or out != 'OK':
-        err = cp.stderr.decode('utf-8', errors='replace').strip()
-        raise RuntimeError(f"ESXi helper preflight failed: rc={cp.returncode}, out={out!r}, err={err!r}")
+        user, host, port, key = _ssh_target(env)
+        target = _helper_error_target(['preflight'], user=user, host=host, port=port, key=key)
+        err = _scrub_ssh_output(cp.stderr.decode('utf-8', errors='replace').strip(),
+                                user=user, host=host, port=port, key=key)
+        out = _scrub_ssh_output(out, user=user, host=host, port=port, key=key)
+        # ssh exits 255 when it fails itself (connect, auth, host key); a remote
+        # helper failure is passed through as the helper's own exit status.
+        if cp.returncode == 255:
+            raise RuntimeError(f"ESXi SSH transport failure while attempting helper {target}: rc={cp.returncode}, out={out!r}, err={err!r}")
+        raise RuntimeError(f"ESXi helper {target} failed: rc={cp.returncode}, out={out!r}, err={err!r}")
 
 
 def _normalize_govc_auth(env_map):
@@ -1153,6 +1209,9 @@ def preflight(args):
         out = cp.stdout.decode('utf-8', errors='replace').strip()
         err = cp.stderr.decode('utf-8', errors='replace').strip()
         helper_ok = (cp.returncode == 0 and out == 'OK')
+        user, host, port, key = _ssh_target(env)
+        out = _scrub_ssh_output(out, user=user, host=host, port=port, key=key)
+        err = _scrub_ssh_output(err, user=user, host=host, port=port, key=key)
         details = f"rc={cp.returncode} out={out!r} err={err!r}"
         checks.append(('esxi_helper_preflight', helper_ok, details))
     except Exception as e:
@@ -1324,6 +1383,9 @@ def cmd_doctor(args):
         out = cp.stdout.decode('utf-8', errors='replace').strip()
         err = cp.stderr.decode('utf-8', errors='replace').strip()
         ok = cp.returncode == 0 and out == 'OK'
+        user, host, port, key = _ssh_target(env)
+        out = _scrub_ssh_output(out, user=user, host=host, port=port, key=key)
+        err = _scrub_ssh_output(err, user=user, host=host, port=port, key=key)
         checks.append(('helper_preflight_strict', ok, f"rc={cp.returncode} out={out!r} err={err!r}"))
     except Exception as e:
         checks.append(('helper_preflight_strict', False, str(e)))

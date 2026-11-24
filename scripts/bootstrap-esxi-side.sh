@@ -452,6 +452,7 @@ case "$cmd" in
     IFS="$OLDIFS"
     which vmkfstools >/dev/null 2>&1 || die "vmkfstools not found"
     which vim-cmd >/dev/null 2>&1 || die "vim-cmd not found"
+    which awk >/dev/null 2>&1 || die "awk not found"
     echo "OK"
     ;;
 
@@ -510,7 +511,7 @@ case "$cmd" in
         if (cur == want) { print "equal"; exit }
         if (cur < want) { print "grow"; exit }
         printf "shrink %.0f %.0f %s\n", cur, want, (cur % 1073741824 == 0 ? sprintf("%.0fG", cur / 1073741824) : "")
-      }' "$vmdk" 2>/dev/null || true)
+      }' "$vmdk" || true)
     set -- $compare
     verdict="${1:-}"
     cur_bytes="${2:-}"
@@ -518,6 +519,7 @@ case "$cmd" in
     cur_gib="${4:-}"
     # a GiB figure is emitted only for a whole-GiB capacity, so the rendered
     # current and requested sizes cannot look equal when the byte values differ
+    capacity_unknown=0
     case "$verdict" in
       equal) echo "OK: disk is already ${size_gb}G; no expand needed"; exit 0 ;;
       shrink)
@@ -528,7 +530,17 @@ case "$cmd" in
         fi
         die "cannot shrink disk: current capacity ${cur_desc} is larger than requested ${size_gb}G (${req_bytes} bytes)"
         ;;
+      grow) ;;
+      *)
+        # "unknown" (no parseable RW extent) or no verdict at all (the size
+        # probe itself failed): say why the capacity is unknown, then still
+        # attempt the expand so vmkfstools decides the real outcome.
+        capacity_unknown=1
+        ;;
     esac
+    if [ "$capacity_unknown" = "1" ]; then
+      echo "WARN: could not determine current capacity of ${vmdk}; attempting expand to ${size_gb}G" >&2
+    fi
     vmkfstools -X "${size_gb}G" "$vmdk"
     ;;
 
