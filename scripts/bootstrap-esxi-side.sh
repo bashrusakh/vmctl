@@ -187,10 +187,28 @@ create_api_role() {
   create_role_if_missing "$API_ROLE" "$API_PRIVS"
 }
 
+validate_entity() {
+  local v_entity="$1"
+  local v_label="$2"
+
+  printf '%s\n' "$v_entity" | grep -Eq '^vim\.[A-Za-z][A-Za-z0-9]*:[0-9A-Za-z].*$' || \
+    die "Invalid managed object reference for $v_label: $v_entity (expected vim.<type>:<id>)"
+}
+
+validate_datastore_entity() {
+  local v_ds="$1"
+  local v_entity="$2"
+
+  printf '%s\n' "$v_entity" | grep -Eq '^vim\.Datastore:[0-9A-Za-z].*$' || \
+    die "Invalid datastore entity for $v_ds: $v_entity (expected vim.Datastore:<id>)"
+}
+
 add_permission() {
   entity="$1"
   principal="$2"
   role="$3"
+
+  validate_entity "$entity" "principal=$principal role=$role"
 
   log "Adding permission: entity=$entity principal=$principal role=$role"
 
@@ -207,20 +225,88 @@ add_permission() {
 find_datastore_entity() {
   ds_name="$1"
 
-  vim-cmd hostsvc/datastore/listsummary | awk -v target="$ds_name" '
-    /datastore = .*vim\.Datastore:/ {
-      line=$0
-      sub(/^.*\x27/, "", line)
-      sub(/\x27.*$/, "", line)
-      entity=line
+  # vim-cmd renders the managed object reference in single quotes and appends a
+  # trailing comma to the field, e.g.
+  #   datastore = 'vim.Datastore:4c5cc8e0-80fe1968-98ec-000c29829b7f',
+  # Take the text between the quotes. Stripping up to the last quote on the
+  # line consumed the entity itself and left only the trailing comma.
+  vim-cmd hostsvc/datastore/listsummary | awk -v target="$ds_name" -v sq="'" -v dq='"' '
+    function unquote(s,   q, rest, end) {
+      sub(/^[ \t]*/, "", s)
+      q = substr(s, 1, 1)
+      if (q != sq && q != dq) return ""
+      rest = substr(s, 2)
+      end = index(rest, q)
+      if (end == 0) return ""
+      return substr(rest, 1, end - 1)
     }
-    /name = / {
-      n=$0
-      sub(/^.*name = "/, "", n)
-      sub(/".*$/, "", n)
-      if (n == target && entity != "") {
-        print entity
-        exit
+
+    # True when the text before position "upto" sits inside a quoted value.
+    # Keeps a "name = " sequence that appears inside a value (a datastore
+    # path, for example) from being mistaken for the field itself.
+    function inside_quotes(s, upto,   i, c, q) {
+      q = ""
+      for (i = 1; i < upto; i++) {
+        c = substr(s, i, 1)
+        if (q != "") {
+          if (c == q) q = ""
+        } else if (c == sq || c == dq) {
+          q = c
+        }
+      }
+      return (q != "")
+    }
+
+    # Read the value of "field" out of one rendered line. The field may sit
+    # anywhere on the line, but only outside a quoted value. fv_found tells
+    # the caller whether the field was present at all, so an absent field is
+    # never confused with a field whose value could not be read.
+    function field_value(s, field,   re, rest, tail, abs, keypos) {
+      fv_found = 0
+      re = "(^|[^A-Za-z0-9_])" field "[ \t]*=[ \t]*"
+      tail = s
+      while (match(tail, re) > 0) {
+        abs = length(s) - length(tail) + RSTART
+        keypos = (substr(s, abs, length(field)) == field) ? abs : abs + 1
+        if (!inside_quotes(s, keypos)) {
+          fv_found = 1
+          rest = substr(s, abs + RLENGTH)
+          return unquote(rest)
+        }
+        tail = substr(tail, RSTART + RLENGTH)
+      }
+      return ""
+    }
+
+    {
+      line = $0
+
+      # Every descriptor block starts with a "{" line: drop the previous
+      # block state so a block without a datastore field cannot inherit one.
+      trimmed = line
+      sub(/^[ \t]+/, "", trimmed)
+      sub(/[ \t]+$/, "", trimmed)
+      if (trimmed != "" && substr(trimmed, length(trimmed), 1) == "{") {
+        entity = ""
+        dsname = ""
+      }
+
+      value = field_value(line, "datastore")
+      if (fv_found) {
+        entity = value
+        if (target != "" && dsname == target && entity != "") {
+          print entity
+          exit
+        }
+      }
+
+      value = field_value(line, "name")
+      if (fv_found) {
+        dsname = value
+        if (target != "" && dsname == target && entity != "") {
+          print entity
+          exit
+        }
       }
     }
   '
@@ -240,6 +326,8 @@ add_datastore_permissions() {
     if [ -z "$entity" ]; then
       die "Could not resolve datastore entity for: $ds"
     fi
+
+    validate_datastore_entity "$ds" "$entity"
 
     add_permission "$entity" "$principal" "$role"
   done
