@@ -405,8 +405,43 @@ case "$cmd" in
     safe_ds "$ds" || die "unsafe datastore"
     safe_name "$vm" || die "unsafe vm name"
     echo "$size_gb" | grep -Eq '^[0-9]{1,4}$' || die "unsafe disk size"
-    [ -f "/vmfs/volumes/$ds/$vm/$vm.vmdk" ] || die "vm disk not found"
-    vmkfstools -X "${size_gb}G" "/vmfs/volumes/$ds/$vm/$vm.vmdk"
+    # normalise leading zeros so the size stays a plain decimal for awk
+    size_gb=$(echo "$size_gb" | sed 's/^0*//')
+    [ -n "$size_gb" ] || size_gb=0
+    vmdk="/vmfs/volumes/$ds/$vm/$vm.vmdk"
+    [ -f "$vmdk" ] || die "vm disk not found"
+    # vmkfstools -X only grows a disk, so ESXi refuses an equal-size request:
+    # skip the expand when the clone is already the requested size. Sizes are
+    # compared in bytes; "G" is GiB (1024^3), the same convention as vmkfstools -X.
+    compare=$(awk -v req="$size_gb" '
+      $1 == "RW" { s += $2 }
+      END {
+        if (s <= 0) { print "unknown"; exit }
+        cur = s * 512
+        want = req * 1024 * 1024 * 1024
+        if (cur == want) { print "equal"; exit }
+        if (cur < want) { print "grow"; exit }
+        printf "shrink %.0f %.0f %s\n", cur, want, (cur % 1073741824 == 0 ? sprintf("%.0fG", cur / 1073741824) : "")
+      }' "$vmdk" 2>/dev/null || true)
+    set -- $compare
+    verdict="${1:-}"
+    cur_bytes="${2:-}"
+    req_bytes="${3:-}"
+    cur_gib="${4:-}"
+    # a GiB figure is emitted only for a whole-GiB capacity, so the rendered
+    # current and requested sizes cannot look equal when the byte values differ
+    case "$verdict" in
+      equal) echo "OK: disk is already ${size_gb}G; no expand needed"; exit 0 ;;
+      shrink)
+        if [ -n "$cur_gib" ]; then
+          cur_desc="${cur_gib} (${cur_bytes} bytes)"
+        else
+          cur_desc="${cur_bytes} bytes"
+        fi
+        die "cannot shrink disk: current capacity ${cur_desc} is larger than requested ${size_gb}G (${req_bytes} bytes)"
+        ;;
+    esac
+    vmkfstools -X "${size_gb}G" "$vmdk"
     ;;
 
   write-vmx-b64)
