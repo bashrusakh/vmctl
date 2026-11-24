@@ -10,6 +10,7 @@
   - `sudo -u vmctl-runner -H /opt/hermes-vmctl/bin/vmctl doctor`
   - `sudo -u vmctl-runner -H /opt/hermes-vmctl/bin/vmctl list --all`
 - Updated `skills/devops/vmctl-ops/README.md` to describe the hardened-install runner model and remove misleading guidance that implied plain interactive-user `vmctl` execution was authoritative.
+- `vmctl create --hostname` now accepts dot-separated FQDN hostnames (for example `vless.itc.local`) in addition to single DNS labels, and rejects hostnames containing control characters such as a trailing newline.
 
 ## v0.1.5 - 2026-05-13
 
