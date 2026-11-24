@@ -32,7 +32,9 @@ AUDIT = BASE / 'logs' / 'audit.log'
 VERSION = '0.1.0'
 
 VM_RE = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$')
-HOST_RE = re.compile(r'^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$')
+HOST_LABEL = r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?'
+HOST_RE = re.compile(r'\A' + HOST_LABEL + r'(?:\.' + HOST_LABEL + r')*\Z')
+HOST_MAX_LEN = 253
 
 
 def nowz():
@@ -276,8 +278,10 @@ def validate_vm_name(name):
 
 
 def validate_hostname(hostname):
-    if not HOST_RE.match(hostname or ''):
-        raise ValueError('invalid hostname')
+    host = hostname or ''
+    if not HOST_RE.match(host) or len(host) > HOST_MAX_LEN:
+        raise ValueError('invalid hostname: expected a DNS label or dot-separated FQDN '
+                         '(lowercase a-z, 0-9, hyphen; label max 63 chars, total max 253 chars)')
 
 
 def validate_network(cfg, net):
